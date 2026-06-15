@@ -1,0 +1,21 @@
+{
+  "name": "rigol-fastrec-agent",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Frida agent for rigol-fastrec: fast WaveRecord readback on Rigol MHO900-series scopes",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "build": "frida-compile src/index.ts -o ../python/rigol_fastrec/_agent.js -c",
+    "watch": "frida-compile src/index.ts -o ../python/rigol_fastrec/_agent.js -w",
+    "check": "tsc --noEmit",
+    "test": "node --test",
+    "regen-blob": "src/native/accum/regen_blob.sh"
+  },
+  "devDependencies": {
+    "@types/frida-gum": "^18.8.2",
+    "frida-compile": "^16.4.2",
+    "typescript": "^5.9.3"
+  },
+  "comment_versions": "package-lock.json is committed and pins exact versions. @types/frida-gum (18.x) is the compile-time API contract; the API surface used (Process/Module/readByteArray/rpc/NativeFunction/CModule) is stable across recent frida-gum, but verify against the deployed frida (17.9.6)."
+}

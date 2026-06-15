@@ -1,0 +1,165 @@
+# API: `WaveRecorder`
+
+`WaveRecorder` is the host-side facade: it owns the SCPI control channel and the
+Frida readback agent, and drives the capture loop
+
+```
+configure() → run(n) → [fire N triggers] → wait_recorded() → read()
+```
+
+`run()` and `read()` are separate so the application controls trigger timing in
+between. The built-in Ethernet port is 100 MbE (~11.7 MB/s) and is the bottleneck
+for raw reads, so most `read()` options come down to sending fewer or denser
+bytes. Relative speeds below assume the link is saturated. (For the underlying
+`ScpiControl`/`Readback` layers, use `rec.scpi` / `rec.readback`.)
+
+## Lifecycle
+
+```python
+WaveRecorder(host, *, data_port=5028, frida_port=27042)
+```
+
+Use it as a context manager -- `__enter__` opens the SCPI socket (and runs the
+`*IDN?` firmware check), then attaches Frida and resolves the agent against the
+firmware whitelist. `__exit__` stops any record and tears everything down:
+
+```python
+with WaveRecorder(host="10.0.80.80") as rec:
+    ...
+```
+
+Raises `ScopeNotFound` (can't reach the scope / frida-server) or
+`UnsupportedFirmware` (model/firmware not whitelisted) on entry.
+
+## `configure(*, samples, sample_rate, trigger, trigger_offset_us=0.0, channels=None)`
+
+Sets the full scope state and enters WaveRecord mode. Call once per capture
+setup. Returns `None`.
+
+| option | what it does | effect |
+|---|---|---|
+| `samples` | per-channel sample count (`:ACQ:MDEP`), snapped up to a valid Rigol depth | deeper means more samples/frame but fewer frames per record (`FMAX` shrinks as memory ÷ depth) |
+| `sample_rate` | Sa/s; the captured window is `samples / sample_rate` | sets time resolution and window length |
+| `trigger` | a `Trigger` (edge source/level/slope + its channel's vertical settings) | the trigger source channel is enabled implicitly |
+| `trigger_offset_us` | signed window placement | `<0` pre-trigger, `>0` delayed |
+| `channels` | `{n: Channel(...)}` to enable + their vertical settings | channels not listed are disabled, so the enabled count is fixed, and with it the FPGA interleave stride (1→2→4) and engine-frame size |
+
+`configure()` also probes and caches `FMAX` (the max recordable frames at this
+depth). To capture more than one record holds, split across multiple
+`run()/read()` cycles (re-firing triggers each time) or use a shallower depth.
+
+## `run(n_frames, *, ready_timeout=None)`
+
+Arms WaveRecord for `n_frames` and blocks until the engine is actually recording
+(`:WREPlay:FCURrent` reaches 1, before any trigger), so triggers fired after
+`run()` returns are caught. Fire your DUT triggers after this returns.
+
+Raises `ValueError` immediately if `n_frames` exceeds the cached `FMAX`, and
+`ScopeRunTimeout` if the engine never comes up within `ready_timeout` (default
+scales with `n_frames`).
+
+## `wait_recorded(timeout=10.0)`
+
+Blocks until the record completes, then transitions the scope to replay so the
+frames are readable. Raises `ScopeRunTimeout` if the record never finishes within
+`timeout` (usually means too few triggers were fired).
+
+## `read(*, count, channel=None, channels=None, crop=None, average=1, sample_bits=16, transport="raw", progress=None)`
+
+Streams `count` recorded frames back. `channel=N` (or `channels=[N]`) returns a
+bare ndarray; `channels=[a, b]` returns `{ch: ndarray}`; by default reads the
+trace channels (all enabled minus the trigger source). `progress(done, total)` is
+called periodically as rows arrive (throttled to ~100 updates over the read,
+always firing on the last); `total = count // average` is the row count (one per
+averaging group, or one per frame when `average == 1`). It runs in the reader
+thread, so keep it cheap; a slow callback backpressures the readback.
+
+| option | what it does | effect on wire / precision |
+|---|---|---|
+| `count=n` | number of recorded frames to read back | with `average=k`, yields `n // k` rows |
+| `channel=` / `channels=` | one channel (bare array) or several (`{ch: array}`), deinterleaved in a single DMA pass | reading K channels ships K× the records |
+| `crop=(lo, hi)` | in-agent per-channel sample window | fewer samples/trace, proportionally less wire, no precision loss. Raises `ValueError` if `hi > samples`. |
+| `average=k` | mean of every `k` frames on the scope → float32 | collapses `k` frames into one row (`n/k` rows). Saves bandwidth and reduces noise (effective bits beyond the ADC). Always float32, so `sample_bits`/`transport` don't apply. |
+| `sample_bits` | `16` → uint16, `8` → uint8 (top byte) | resolution vs wire width (below) |
+| `transport` | `"raw"`, or `"packed"` (16-bit only) | wire packing (below) |
+
+### Wire encodings (raw reads, `average == 1`)
+
+| `sample_bits` | `transport` | bytes/sample | returns | precision | rel. speed |
+|---|---|---|---|---|---|
+| 16 | `raw` *(default)* | 2.0 | uint16 | full 16-bit code | 1.0× |
+| 16 | `packed` | 1.5 | uint16 | top 12 bits (may drop real data, see below) | ~1.33× |
+| 8 | `raw` | 1.0 | uint8 | top 8 bits | ~2× |
+| 8 | `packed` | n/a | n/a | n/a | *raises* |
+
+- `16/packed` keeps the top 12 bits (drops the low 4), packed 2 samples per 3
+  bytes and rebuilt to uint16 on the host with the low 4 bits zeroed -- drop-in
+  with `to_volts()`. This can discard real data. It's lossless only when the
+  capture's effective resolution is ≤ 12 bits, which holds for a plain
+  single-shot acquisition on the 12-bit ADC (the low bits there are sub-LSB
+  calibration/noise). But the codes are a processed 16-bit value: anything that
+  yields more than 12 effective bits (high-res/ERES, hardware averaging, other
+  DSP, depending on model and acquisition mode) puts real signal in those low
+  bits, and packing throws it away. Use it when you know your capture is ≤ 12
+  effective bits; otherwise stick with `16/raw`.
+- `8/raw` keeps the high byte (`code >> 8`) as uint8, half resolution.
+  `to_volts()` handles it (lifts uint8 back to the 16-bit domain ×256). Fine for
+  SCA, where correlation is offset-invariant anyway.
+- Combining `sample_bits`/`transport` with `average > 1` raises (averaged reads
+  are float32 averages).
+
+Measured on the MHO98 over the 100 MbE port (253k frames, 1000 samples):
+`16/raw` 5594 frames/s, `16/packed` 7346 (1.31×), `8/raw` 10777 (1.93×), all at
+the saturated ~11.7 MB/s, so the win shows up as more frames through the same
+pipe. (The engine→agent DMA itself runs at ~470 MB/s; the wire, never the scope,
+is the limit.)
+
+#### Picking a combo
+
+- Max fidelity: `16/raw` (default).
+- Cheap 25%: `16/packed`, but only when your capture is ≤ 12 effective bits (see
+  the caveat above).
+- 2× and 8 bits is enough: `sample_bits=8`.
+- Many repeats per trace: `average=k`, usually the biggest saver, and it improves
+  SNR. Pair with `crop=` to send only the window you care about.
+
+## `to_volts(codes, channel)`
+
+Scales codes (or `float32` averages) for `channel` to volts, using the WORD-format
+preamble cached at `configure()`. Vectorized over any array shape. Correct for
+`16/raw`, `16/packed`, and averages directly; `uint8` (from `sample_bits=8`)
+is lifted back to the 16-bit domain (×256) first.
+
+## Introspection
+
+- `max_frames(*, refresh=False)` → the max recordable frames at the current
+  depth (`FMAX`). Cached at `configure()`; `refresh=True` re-probes the scope.
+- `channel_layout()` → a `ChannelLayout` with the live `stride`, enabled
+  channels, per-channel lane `offsets`, and `samples_per_frame` (= MDEP).
+
+## Value types
+
+```python
+Trigger(source="CHAN2", level=1.5, slope="POS",          # edge trigger
+        channel_range=8.0, channel_offset=0.0,           # the source channel's
+        channel_coupling="DC", channel_probe=1.0)        #   vertical config
+
+Channel(range=0.5, coupling="DC", probe=1.0,             # per-channel vertical
+        offset=0.0, bandwidth_limit="OFF")               # range = full-scale V
+```
+
+`level`/`offset` are in probe-tip volts; `range` is full-scale (8 vertical
+divisions). `slope` is `"POS"`/`"NEG"`; `bandwidth_limit` is `"OFF"`/`"20M"`/
+`"250M"` (model-dependent).
+
+## Errors
+
+All subclass `RigolFastrecError`:
+
+- `ScopeNotFound`: scope / frida-server unreachable, or process not found.
+- `UnsupportedFirmware`: model/firmware not on the whitelist (host or agent).
+- `ScopeRunTimeout`: WaveRecord didn't arm (`run`) or didn't finish
+  (`wait_recorded`) in time.
+- `ReadbackShortRead`: the readback stream desynced / came up short.
+- `AgentError`: the Frida agent reported an error (carries any structured detail
+  in `.detail`).

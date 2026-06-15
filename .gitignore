@@ -1,0 +1,25 @@
+# Node / agent build
+node_modules/
+agent/node_modules/
+agent/dist/
+*.tsbuildinfo
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+build/
+python/dist/
+
+# The built agent bundle (python/rigol_fastrec/_agent.js) IS committed, so users
+# need no Node to run it; `npm run build` writes it directly. It's the only
+# committed build artifact.
+
+# OS / editor
+.DS_Store
+*.swp
+
+# firmware packages
+firmware/
