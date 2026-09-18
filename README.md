@@ -15,6 +15,9 @@ Validated on an MHO98 (firmware `00.01.00`):
   wait_recorded → read`, with frame-averaging, multi-channel deinterleave, and
   crop all on the scope. Multiple channels come out of a single DMA pass as
   `{channel: ndarray}`.
+- Continuous streaming (`stream()`): the agent runs the capture loop itself and
+  yields one frame per trigger until you stop, for live viewing or open-ended
+  capture.
 - Python 3.12+.
 
 Probably adaptable to other Rigol scopes running Android.
@@ -24,7 +27,7 @@ Probably adaptable to other Rigol scopes running Android.
 ```bash
 git clone https://github.com/uberjay/rigol-fastrec && cd rigol-fastrec
 python -m venv .venv && source .venv/bin/activate
-pip install -e python      # installs rigol_fastrec + numpy / pyvisa / pyvisa-py / frida
+pip install -e .           # installs rigol_fastrec + numpy / pyvisa / pyvisa-py / frida
 ```
 
 The built Frida agent (`rigol_fastrec/_agent.js`) is committed and ships as
@@ -80,13 +83,20 @@ with WaveRecorder(host="10.0.80.80") as rec:
     rec.run(64); rec.wait_recorded()
     eightbit_frames = rec.read(count=64, channel=1, sample_bits=8)        # uint8,  ~2x faster
     frames = rec.read(count=64, channel=1, transport="packed")  # uint16, ~1.33x faster
+
+    # 4) continuous: the agent captures and yields one frame per trigger until you break
+    rec.scpi.write(":TRIGger:SWEep AUTO")               # free-run; omit to wait for real triggers
+    for frame in rec.stream(channel=1):                 # uint16 (1000,)
+        ...
+        break
 ```
 
 `configure()` once, then `run → wait_recorded → read` per batch -- fire your DUT
 triggers between `run()` and `wait_recorded()` (the examples self-trigger, so
-they need no DUT). See `examples/` for runnable scripts and
-[docs/API.md](docs/API.md) for the full `WaveRecorder` reference: every method
-and read/configure option, with the speed/precision trade-offs.
+they need no DUT). `stream()` replaces that loop for open-ended capture. See
+`examples/` for runnable scripts and [docs/API.md](docs/API.md) for the full
+`WaveRecorder` reference: every method and read/configure option, with the
+speed/precision trade-offs.
 
 ## Running the examples
 
@@ -106,11 +116,21 @@ python examples/throughput_bench.py --host 10.0.80.80 \
     --batches 64,256,1024 --average 1,8
 ```
 
+`stream_viewer` is a live plot over `stream()` (latest frame plus a rolling
+average; drag to read off a `--crop` window). It needs the `viewer` extra
+(pyqtgraph + PyQt6):
+
+```bash
+pip install -e '.[viewer]'
+python examples/stream_viewer.py --host 10.0.80.80 --channel 1 --range 1.0
+python examples/stream_viewer.py --host 10.0.80.80 --channel 1 --no-auto   # real triggers only
+```
+
 ## Tests
 
 ```bash
-pip install -e 'python[dev]'
-cd python && pytest          # offline; no scope/Frida needed
+pip install -e '.[dev]'
+pytest                       # offline; no scope/Frida needed
 ```
 
 `make check` also runs them, plus type-checks the agent (that half needs Node).
@@ -119,8 +139,9 @@ cd python && pytest          # offline; no scope/Frida needed
 
 ```
 agent/    TypeScript Frida agent (frida-compile); builds the committed bundle below
-python/   rigol_fastrec -- host library + committed _agent.js bundle (pyproject here)
-examples/ runnable scripts: capture_basic, throughput_bench
+python/   rigol_fastrec -- host library + committed _agent.js bundle, and its tests
+          (pyproject.toml is at the repo root)
+examples/ runnable scripts: capture_basic, throughput_bench, stream_viewer
 docs/     API.md -- WaveRecorder reference; VALIDATION.md -- on-scope tests;
           DESIGN.md -- architecture & design notes
 ```

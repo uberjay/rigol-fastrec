@@ -1,0 +1,62 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "rigol-fastrec"
+dynamic = ["version"]            # single-sourced from python/rigol_fastrec/__init__.py
+description = "Use a Rigol MHO900-series scope as a fast streaming ADC: WaveRecord readback over LAN via a Frida agent."
+readme = "README.md"
+requires-python = ">=3.12"
+license = "MIT"
+license-files = ["LICENSE"]      # root only; the default glob walks the whole tree
+authors = [{ name = "Joshua Huber" }]
+keywords = ["rigol", "oscilloscope", "mho900", "frida", "side-channel", "waverecord", "fast-record"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering",
+    "Programming Language :: Python :: 3.12",
+    "Operating System :: POSIX",
+]
+dependencies = [
+    "numpy>=1.24",
+    "pyvisa>=1.13",
+    "pyvisa-py>=0.7",
+    "frida>=17,<18",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+# examples/stream_viewer.py only; the other examples need just the base deps.
+viewer = ["pyqtgraph>=0.13", "PyQt6>=6.4"]
+
+[project.urls]
+Homepage = "https://github.com/uberjay/rigol-fastrec"
+Repository = "https://github.com/uberjay/rigol-fastrec"
+
+[tool.hatch.version]
+path = "python/rigol_fastrec/__init__.py"
+
+# The package lives under python/ (the repo root also holds the agent sources,
+# docs, examples, and tools); hatchling installs it as top-level `rigol_fastrec`.
+[tool.hatch.build.targets.wheel]
+packages = ["python/rigol_fastrec"]
+# The built Frida agent bundle (python/rigol_fastrec/_agent.js) is committed
+# and ships as package data, so installs need no Node toolchain. `npm run
+# build` (or `make build`) regenerates it in place; the runtime loader raises a
+# clear error if it's somehow absent.
+
+[tool.hatch.build.targets.sdist]
+# Only what the package needs; the agent sources, docs, examples, and tools
+# stay in the repository.
+only-include = [
+    "python/rigol_fastrec",
+    "python/tests",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["python/tests"]

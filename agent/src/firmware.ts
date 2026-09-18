@@ -43,6 +43,10 @@ const MHO98_SYMBOLS = {
     setPlayEnable:    "_Z24DrvAcquire_SetPlayEnableb",
     exportInit:       "_Z22DrvWaveform_ExportInitj",
     exportBack:       "_Z22DrvWaveform_ExportBackv",
+    // streaming: agent-driven segment capture. getPlayInfo(count*, ready*)
+    // reports how many frames the FPGA has recorded so far + a ready bit,
+    // so the stream loop can pace itself without the SCPI WaveRecord host path.
+    getPlayInfo:      "DevSystemScu_getPlayInfo",
     // SPU replay-setup setters (re-issued per chunk with the captured args)
     setWaveRange:     "DevAcquireSPU_SetWaveRange",
     setTxInfo:        "DevAcquireSpu_SetTxInfo",

@@ -8,10 +8,13 @@ configure() → run(n) → [fire N triggers] → wait_recorded() → read()
 ```
 
 `run()` and `read()` are separate so the application controls trigger timing in
-between. The built-in Ethernet port is 100 MbE (~11.7 MB/s) and is the bottleneck
-for raw reads, so most `read()` options come down to sending fewer or denser
-bytes. Relative speeds below assume the link is saturated. (For the underlying
-`ScpiControl`/`Readback` layers, use `rec.scpi` / `rec.readback`.)
+between. For open-ended capture, [`stream()`](#stream-channelnone-channelsnone-cropnone-sample_bits16-transportraw-batch0)
+replaces that loop: the agent arms and reads batches itself and yields one frame
+per trigger until you stop iterating. The built-in Ethernet port is 100 MbE
+(~11.7 MB/s) and is the bottleneck for raw reads, so most `read()` options come
+down to sending fewer or denser bytes. Relative speeds below assume the link is
+saturated. (For the underlying `ScpiControl`/`Readback` layers, use `rec.scpi` /
+`rec.readback`.)
 
 ## Lifecycle
 
@@ -123,6 +126,70 @@ is the limit.)
 - Many repeats per trace: `average=k`, usually the biggest saver, and it improves
   SNR. Pair with `crop=` to send only the window you care about.
 
+## `stream(*, channel=None, channels=None, crop=None, sample_bits=16, transport="raw", batch=0)`
+
+Continuous capture. Returns a generator that yields one frame per trigger for as
+long as you iterate. The agent owns the capture loop: it arms a batch of frames
+in the FPGA, waits for the hardware to record it, DMAs it into RAM, re-arms the
+next batch, and then sends the batch it just read while the next one captures.
+There is no `run()`/`wait_recorded()`; call it after `configure()`.
+
+```python
+rec.scpi.write(":TRIGger:SWEep AUTO")    # free-run; omit to wait for real triggers
+for frame in rec.stream(channel=1):      # uint16 (1000,), one per trigger
+    volts = rec.to_volts(frame, channel=1)
+    ...
+    if done:
+        break                            # stops the agent, closes the data socket
+```
+
+`channel=N` (or `channels=[N]`) yields a bare ndarray of shape `(samples,)`;
+`channels=[a, b]` yields `{ch: ndarray}`; the default is the trace channels, as
+for `read()`. `crop`, `sample_bits`, and `transport` mean what they do in
+`read()` and return the same dtypes. Raw encodings only: there is no `average`.
+
+| option | what it does |
+|---|---|
+| `channel=` / `channels=` | one channel (bare array) or several (`{ch: array}`), deinterleaved on the scope |
+| `crop=(lo, hi)` | in-agent per-channel sample window; frames come back as `(hi - lo,)` |
+| `sample_bits` / `transport` | wire encoding, same table as `read()`: `16/raw` uint16, `16/packed` uint16 with the low 4 bits zero, `8/raw` uint8 |
+| `batch=n` | cap on frames per FPGA capture. `0` (default) uses the hardware maximum for the current depth (`dwMaxFrameCount`, which shrinks as depth grows). The agent sizes each capture adaptively below the cap; see Batching below |
+
+Behaviour to know about:
+
+- **Triggering.** `configure()` sets NORM sweep, so by default the stream waits
+  for real triggers and yields nothing until they fire. For a free-running
+  signal, set `:TRIGger:SWEep AUTO` first (as above; the viewer example and the
+  validation harness do this). Feed triggers continuously either way.
+- **Batching.** The agent sizes each capture to the trigger rate. It starts at
+  one frame and doubles the arm while full batches land quickly, so sparse
+  triggers are delivered one at a time with no added latency and fast
+  triggers fill batches (up to `batch`) that keep the wire busy. A partial
+  batch is delivered after 50 ms, or after 20 ms with no new frame, so
+  latency is bounded at about 50 ms. `batch=1` forces one frame per capture
+  and tops out near 850 frames/s. Measured with a square-wave trigger at 1000
+  samples on the default cap (`tools/stream_batch_probe.py`):
+
+  | trigger rate | delivered |
+  |---|---|
+  | up to 150 Hz | 98% or more of triggers |
+  | 200 Hz | about 96% |
+  | 1 kHz | about 91% |
+  | 10 kHz | about 5300 frames/s, the wire limit |
+- **Display.** The scope's own acquisition and display are parked for the life
+  of the stream (the same export bracket `read()` uses) and restored when it
+  stops. A `read()` after the stream works normally.
+- **Stopping.** `break`, `gen.close()`, or leaving the `with` block asks the
+  agent to finish its current batch and closes the data socket. A new
+  `stream()` or `read()` can follow immediately.
+- **Timeouts.** The data socket has a 20 s per-receive watchdog, so a gap of
+  more than 20 s between frames raises `TimeoutError` out of the generator.
+
+Raises `ValueError` for a bad encoding combination, an out-of-range crop, or
+no channels; `AgentError` if the agent refuses to start the stream;
+`ReadbackShortRead` if a record's length doesn't match; `ConnectionError` if
+the socket closes mid-record.
+
 ## `to_volts(codes, channel)`
 
 Scales codes (or `float32` averages) for `channel` to volts, using the WORD-format
@@ -160,6 +227,7 @@ All subclass `RigolFastrecError`:
 - `UnsupportedFirmware`: model/firmware not on the whitelist (host or agent).
 - `ScopeRunTimeout`: WaveRecord didn't arm (`run`) or didn't finish
   (`wait_recorded`) in time.
-- `ReadbackShortRead`: the readback stream desynced / came up short.
+- `ReadbackShortRead`: the readback stream desynced / came up short (`read()` or
+  `stream()`).
 - `AgentError`: the Frida agent reported an error (carries any structured detail
   in `.detail`).

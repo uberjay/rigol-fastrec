@@ -310,6 +310,111 @@ class Readback:
                       dma_bytes / dma_ms / 1e3, count / dma_ms * 1e3)
         return out
 
+    def stream(self, *, samples_per_frame: int,
+               channels: list[int] | tuple[int, ...] = (1,),
+               crop: tuple[int, int] | None = None,
+               sample_bits: int = 16, transport: str = "raw", batch: int = 0):
+        """Yield frames from the agent-driven continuous stream, one per recorded
+        waveform, until the caller stops iterating.
+
+        Unlike read() (one host-armed batch), the agent owns the capture loop:
+        it captures a batch itself (SetRun mode=2), waits for the FPGA to record
+        it (getPlayInfo), replays + DMAs it, then sends it while the next batch
+        captures. Yields ``{channel: ndarray}``, or a bare ndarray for a single
+        channel. Raw encodings only (`sample_bits` 16/8, `transport` raw/packed);
+        no averaging. `batch` caps frames per capture (<=0 → the hardware
+        dwMaxFrameCount); the agent sizes each capture below that to the trigger
+        rate. Breaking out of the loop stops the agent and closes the socket."""
+        import numpy as np
+
+        if sample_bits not in (16, 8):
+            raise ValueError(f"sample_bits must be 16 or 8, got {sample_bits}")
+        if transport not in ("raw", "packed"):
+            raise ValueError(f"transport must be 'raw' or 'packed', got {transport!r}")
+        if sample_bits == 8 and transport == "packed":
+            raise ValueError("transport='packed' applies only to sample_bits=16")
+        if self._script is None:
+            raise ScopeNotFound("not open()ed")
+
+        chans = [int(c) for c in channels]
+        if not chans:
+            raise ValueError("no channels to stream")
+        full = int(samples_per_frame)
+        if crop is not None:
+            crop_lo, crop_hi = int(crop[0]), int(crop[1])
+            if not (0 <= crop_lo < crop_hi <= full):
+                raise ValueError(
+                    f"crop {(crop_lo, crop_hi)} out of range for {full} samples/frame")
+            out_len = crop_hi - crop_lo
+        else:
+            crop_lo = crop_hi = 0
+            out_len = full
+
+        if sample_bits == 8:
+            item, itemsize, out_bits = np.uint8, 1, 8
+        elif transport == "packed":
+            item, itemsize, out_bits = np.uint16, 2, 12
+        else:
+            item, itemsize, out_bits = np.uint16, 2, 16
+        packed12 = (out_bits == 12)
+        single = len(chans) == 1
+
+        sock = self._ensure_data_socket()
+        log.info("stream: channels=%s spf=%d crop=(%d,%d) wire=%s batch=%d",
+                 chans, full, crop_lo, crop_hi,
+                 ("i12-packed" if packed12 else item.__name__), batch)
+        started = False
+        try:
+            # A just-stopped stream may still be winding down (the agent clears
+            # its `streaming` flag after the loop's finally restores export), so
+            # retry briefly if it reports "already running".
+            r: dict = {}
+            for _ in range(20):
+                r = dict(self._script.exports_sync.stream_frames({
+                    "samplesPerFrame": full, "channels": chans,
+                    "cropLo": crop_lo, "cropHi": crop_hi,
+                    "outBits": out_bits, "batch": int(batch),
+                }))
+                if r.get("ok") or "already running" not in str(r.get("error", "")):
+                    break
+                time.sleep(0.05)
+            if not r.get("ok"):
+                raise AgentError(f"stream_frames failed: {r}")
+            started = True
+            while True:
+                frame = {}
+                for ch in chans:
+                    n = struct.unpack("<I", _recv_exact(sock, 4))[0]
+                    if n != out_len:
+                        raise ReadbackShortRead(
+                            f"record had {n} samples, expected {out_len}")
+                    if packed12:
+                        row = _unpack12(_recv_exact(sock, ((n + 1) // 2) * 3), n)
+                    else:
+                        row = np.frombuffer(_recv_exact(sock, n * itemsize),
+                                            dtype=item, count=n)
+                    frame[ch] = row
+                yield frame[chans[0]] if single else frame
+        finally:
+            # Order matters. The agent may be blocked in the C send with the
+            # socket buffer full (a large batch we stopped reading mid-way);
+            # RPCs run on the same JS thread, so stream_stop would never be
+            # serviced and we'd deadlock waiting for its reply. Shut the socket
+            # down first: the send fails, the loop breaks and restores export.
+            # Then stream_stop covers the other case (loop polling for a
+            # capture, not writing), and the fds are dropped.
+            if self._sock is not None:
+                try:
+                    self._sock.shutdown(socket.SHUT_RDWR)
+                except Exception:
+                    pass
+            if started:
+                try:
+                    self._script.exports_sync.stream_stop()
+                except Exception:
+                    pass
+            self._close_data_socket()
+
     def _ensure_data_socket(self) -> "socket.socket":
         """Open the agent's listen socket + connect, once; reuse thereafter."""
         if self._sock is not None:

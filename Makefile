@@ -13,7 +13,7 @@ check-agent:
 	cd agent && npm run check
 
 check-python:
-	cd python && python -m pip install -e .[dev] -q && python -m pytest -q
+	python -m pip install -e '.[dev]' -q && python -m pytest -q
 
 ## regenerate the NEON accumulator blob from accum.S (needs Docker)
 neon-blob:

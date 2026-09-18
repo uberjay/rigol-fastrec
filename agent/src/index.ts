@@ -6,6 +6,7 @@
 import {
     init, dispose, resolve, info, selftest,
     channelLayout, readbackOpen, readbackClose, readbackConnected, readFrames,
+    streamFrames, streamStop,
 } from "./rpc.js";
 
 rpc.exports = {
@@ -19,4 +20,6 @@ rpc.exports = {
     readbackClose,
     readbackConnected,
     readFrames,
+    streamFrames,
+    streamStop,
 };

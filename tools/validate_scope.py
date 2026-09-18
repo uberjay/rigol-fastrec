@@ -3,7 +3,7 @@
 path against real hardware and asserts it behaves correctly. See
 docs/VALIDATION.md for the bench setup and pass criteria.
 
-Two groups of checks:
+Three groups of checks:
 
 * **Self-consistency** (no signal needed): shapes/dtypes, crop == full slice,
   averaging == numpy mean of the raw frames (with a frame count chosen to span
@@ -18,22 +18,27 @@ Two groups of checks:
   drive a SECOND channel at a distinct frequency (--afg-channel2) so each
   channel must report its own frequency -- a direct cross-talk / swap test.
 
-    # self-consistency only (no AFG / no cabling)
+* **Streaming** (agent-driven continuous capture): pull a few frames off
+  WaveRecorder.stream() per encoding (raw / packed / 8-bit / crop / multichannel),
+  confirm frames re-capture (vary) rather than replay a stale buffer, check the
+  streamed frequency with the AFG, and confirm a normal read() still works after
+  the stream stops (export restored). Skip with --no-stream.
+
+    # full default run (assumes AFG1→CHAN1, AFG2→CHAN3, nothing on CHAN2):
+    # exercises every check -- lane mapping, cross-talk, the combinations, streaming
+    python tools/validate_scope.py --host mho98.oodles.be
+
+    # nothing connected: self-consistency + streaming checks only
     python tools/validate_scope.py --host mho98.oodles.be --no-afg
 
-    # full run: AFG sine cabled into CHAN1, channels 1+3 enabled
-    python tools/validate_scope.py --host mho98.oodles.be \
-        --channels 1,3 --afg-channel 1
+    # single-output AFG cabled to CHAN1
+    python tools/validate_scope.py --host mho98.oodles.be --afg-channel2 0
 
-    # lane-mapping with a non-contiguous enable set (the subtle case)
-    python tools/validate_scope.py --host mho98.oodles.be \
-        --channels 1,2,4 --afg-channel 4
-
-    # dual-output AFG: distinct freqs on CH1 + CH4, cross-talk test in one pass
+    # the subtlest lane case: non-contiguous enable set (gap at lane 2)
     python tools/validate_scope.py --host mho98.oodles.be \
         --channels 1,2,4 --afg-channel 1 --afg-channel2 4
 
-Requires the package importable (`pip install -e python`) and the scope
+Requires the package importable (`pip install -e .`) and the scope
 reachable over SCPI (5555) + frida-server (27042).
 """
 
@@ -149,11 +154,38 @@ def measured_hz(codes: np.ndarray, fs: float, rows: int = 16) -> float:
     return float(np.median([fundamental_hz(codes[i], fs) for i in range(n)]))
 
 
+def take_stream(rec: WaveRecorder, n: int, **kw) -> list:
+    """Pull the first n frames off rec.stream(**kw), then stop the stream
+    cleanly. gen.close() raises GeneratorExit at the suspended yield, running
+    the generator's finally (streamStop + data-socket teardown)."""
+    frames: list = []
+    gen = rec.stream(**kw)
+    try:
+        for f in gen:
+            frames.append(f)
+            if len(frames) >= n:
+                break
+    finally:
+        gen.close()
+    return frames
+
+
 def main() -> int:
-    p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    p = argparse.ArgumentParser(
+        description=__doc__.split("\n\n")[0],
+        epilog="The default options assume AFG1 (SOURce1) is connected to CHAN1 "
+               "and AFG2 (SOURce2) is connected to CHAN3, with nothing on CHAN2 "
+               "(the undriven cross-talk witness). This default exercises every "
+               "check: 4-channel-mode lane mapping, dual-source cross-talk, the "
+               "multichannel + crop + average + encoding combinations, and "
+               "streaming. Run with --no-afg for the self-consistency + streaming "
+               "checks with nothing connected, or --afg-channel2 0 for a "
+               "single-output AFG.",
+        formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--host", default="mho98.oodles.be")
-    p.add_argument("--channels", default="1",
-                   help="comma-separated trace channels to enable, e.g. 1,2,4")
+    p.add_argument("--channels", default="1,2,3",
+                   help="comma-separated trace channels to enable (default 1,2,3, "
+                        "which gives 4-channel FPGA mode); AFG channels must be in it")
     p.add_argument("--trigger-source", default="CHAN2")
     p.add_argument("--samples", type=int, default=1000)
     p.add_argument("--sample-rate", type=float, default=1e9)
@@ -165,9 +197,9 @@ def main() -> int:
     p.add_argument("--range", type=float, default=8.0,
                    help="per-channel full-scale volts (8 div); wide enough for the AFG")
     # AFG / lane mapping
-    p.add_argument("--afg-channel", type=int, default=None,
-                   help="input channel the AFG output is physically cabled to; "
-                        "enables the AFG lane-mapping check")
+    p.add_argument("--afg-channel", type=int, default=1,
+                   help="input channel AFG1 (SOURce1) is cabled to (default 1); "
+                        "drives the AFG lane-mapping check")
     p.add_argument("--no-afg", dest="afg", action="store_false",
                    help="skip AFG setup + the lane-mapping check (self-consistency only)")
     p.add_argument("--afg-prefix", default=":SOURce1")
@@ -175,12 +207,18 @@ def main() -> int:
     p.add_argument("--afg-offset", type=float, default=0.0)
     p.add_argument("--afg-periods", type=float, default=12.0,
                    help="how many signal periods to fit in one frame (sets AFG freq)")
-    p.add_argument("--afg-channel2", type=int, default=None,
-                   help="2nd AFG source's input channel (dual-output AFG); drives a "
-                        "DISTINCT frequency to prove channels don't cross-contaminate")
+    p.add_argument("--afg-channel2", type=int, default=3,
+                   help="input channel AFG2 (SOURce2) is cabled to (default 3); drives "
+                        "a DISTINCT frequency to prove channels don't cross-contaminate. "
+                        "Pass 0 for a single-output AFG")
     p.add_argument("--afg-prefix2", default=":SOURce2")
     p.add_argument("--afg-periods2", type=float, default=7.0,
                    help="periods/frame for the 2nd source (distinct from --afg-periods)")
+    # streaming (agent-driven continuous capture)
+    p.add_argument("--no-stream", dest="stream", action="store_false",
+                   help="skip the streaming checks (agent-driven continuous capture)")
+    p.add_argument("--stream-frames", type=int, default=8,
+                   help="frames to pull per streaming check (default 8)")
     p.add_argument("-v", "--verbose", action="count", default=0,
                    help="-v: ops; -vv: + raw SCPI/agent firehose")
     args = p.parse_args()
@@ -189,6 +227,10 @@ def main() -> int:
         import logging
         from rigol_fastrec import enable_logging
         enable_logging(logging.DEBUG if args.verbose >= 2 else logging.INFO)
+
+    # --afg-channel2 0 (or negative) → single-output AFG (no 2nd source).
+    if args.afg_channel2 is not None and args.afg_channel2 < 1:
+        args.afg_channel2 = None
 
     enabled = [int(c) for c in args.channels.split(",") if c.strip()]
     use_afg = args.afg and args.afg_channel is not None
@@ -408,6 +450,75 @@ def main() -> int:
                     v.check(f"CHAN{c} quiet (no cross-talk)",
                             p2p[c] < quiet_lim,
                             f"p2p={p2p[c]:.3f} V (< {quiet_lim:.3f})")
+
+        # --- Tier 3: streaming (agent-driven continuous capture) ------------
+        # Bounded checks: pull a few frames off each stream, then stop. The
+        # stream drives capture itself (SetRun mode=2 + getPlayInfo) and brackets
+        # it in export mode, so the last check confirms a normal read() still
+        # works afterward (export restored, engine sane). AUTO sweep (set above)
+        # keeps triggers flowing so frames arrive promptly.
+        if args.stream:
+            print("\nstreaming:")
+            sN = max(2, args.stream_frames)
+
+            def stream_shape():
+                fr = take_stream(rec, sN, channel=ch)
+                ok = (len(fr) == sN and all(
+                    f.shape == (mdep,) and f.dtype == np.uint16 for f in fr))
+                return ok, f"{len(fr)} frames, each ({mdep},) uint16"
+            v.run("stream raw shape/dtype", stream_shape)
+
+            def stream_live():
+                fr = take_stream(rec, max(4, sN), channel=ch)
+                varies = len(fr) >= 2 and any(
+                    not np.array_equal(fr[0], f) for f in fr[1:])
+                return varies, ("consecutive frames differ (live re-capture)" if varies
+                                else "frames identical -- replaying a stale buffer?")
+            v.run("stream re-captures (frames vary)", stream_live)
+
+            def stream_packed():
+                fr = take_stream(rec, max(2, sN // 2), channel=ch, transport="packed")
+                ok = all(f.shape == (mdep,) and f.dtype == np.uint16
+                         and int(np.bitwise_and(f, 0xF).max()) == 0 for f in fr)
+                return ok, f"{len(fr)} packed frames → uint16, low 4 bits zero"
+            v.run("stream + packed", stream_packed)
+
+            def stream_8bit():
+                fr = take_stream(rec, max(2, sN // 2), channel=ch, sample_bits=8)
+                ok = all(f.shape == (mdep,) and f.dtype == np.uint8 for f in fr)
+                return ok, f"{len(fr)} frames, ({mdep},) uint8"
+            v.run("stream + 8-bit", stream_8bit)
+
+            def stream_crop():
+                fr = take_stream(rec, max(2, sN // 2), channel=ch, crop=(lo, hi))
+                ok = all(f.shape == (hi - lo,) and f.dtype == np.uint16 for f in fr)
+                return ok, f"{len(fr)} frames cropped to {hi - lo} samples"
+            v.run("stream + crop", stream_crop)
+
+            if len(enabled) > 1:
+                def stream_multi():
+                    fr = take_stream(rec, max(2, sN // 2), channels=enabled)
+                    ok = all(isinstance(f, dict) and set(f) == set(enabled)
+                             and all(f[c].shape == (mdep,) for c in enabled)
+                             for f in fr)
+                    return ok, f"{len(fr)} frames, dict{{{enabled}}} each ({mdep},)"
+                v.run("stream multichannel demux", stream_multi)
+
+            if use_afg and ch in driven:
+                def stream_freq():
+                    fr = take_stream(rec, max(8, sN), channel=ch)
+                    fhz = measured_hz(np.asarray(fr), args.sample_rate)
+                    fexp = driven[ch]
+                    return abs(fhz - fexp) <= 0.05 * fexp, \
+                        f"streamed freq {fhz:.4g} vs {fexp:.4g} Hz"
+                v.run(f"stream CHAN{ch} reconstructs {driven[ch]/1e6:.3g} MHz",
+                      stream_freq)
+
+            def read_after_stream():
+                r = rec.read(count=min(8, F), channel=ch)
+                ok = r.dtype == np.uint16 and r.shape[1] == mdep
+                return ok, "one-shot read() works after streaming (export restored)"
+            v.run("read() works after stream", read_after_stream)
 
         for pfx, _c, _f in afg_sources:
             afg_off(rec, prefix=pfx)

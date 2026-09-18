@@ -5,7 +5,7 @@ import { native, resetState } from "./state.js";
 import { resolveDiagnostic, type ResolveResult } from "./native/resolve.js";
 import { NEON_BLOB_SIZE, ensureCModule, buildRawSyscall } from "./native/cmodule.js";
 import { channelLayout as getChannelLayout, type ChannelLayout } from "./native/layout.js";
-import { readFrames as doReadFrames, restoreExport, type ReadFramesArgs, type ReadFramesResult } from "./native/readback.js";
+import { readFrames as doReadFrames, restoreExport, streamFrames as doStreamFrames, streamStop as doStreamStop, type ReadFramesArgs, type ReadFramesResult, type StreamArgs } from "./native/readback.js";
 import * as transport from "./transport.js";
 
 let initialized = false;
@@ -16,6 +16,7 @@ export function init(): { ok: boolean } {
 }
 
 export function dispose(): { ok: boolean } {
+    doStreamStop();    // ask any running stream loop to stop
     restoreExport();   // un-freeze the live playback loop if a readback was cut short
     transport.close();
     resetState();
@@ -51,6 +52,17 @@ export function readbackConnected(): { connected: boolean } {
 /** Unified multi-frame readback; streams over the data socket, returns status. */
 export function readFrames(args: ReadFramesArgs): ReadFramesResult {
     return doReadFrames(args);
+}
+
+/** Start the agent-driven continuous stream (fire-and-forget; returns at once).
+ *  Frames flow over the data socket until streamStop(). */
+export function streamFrames(args: StreamArgs): { ok: boolean; error?: string } {
+    return doStreamFrames(args);
+}
+
+/** Stop the running stream after the current batch. */
+export function streamStop(): { ok: boolean } {
+    return doStreamStop();
 }
 
 /** Smoke test: build the CModule and exercise the trivial ping fn + the

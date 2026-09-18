@@ -32,13 +32,13 @@ jobs:
       - name: Run offline tests
         run: |
           python -m pip install --upgrade pip
-          pip install -e "python[dev]"
-          python -m pytest python
+          pip install -e ".[dev]"
+          python -m pytest
 
       - name: Build wheel + sdist
         run: |
           pip install build
-          python -m build python
+          python -m build
 
       - name: Extract CHANGELOG section
         run: |
@@ -60,4 +60,4 @@ jobs:
           gh release create "$GITHUB_REF_NAME" \
             --title "$GITHUB_REF_NAME" \
             --notes-file release-notes.md \
-            python/dist/*
+            dist/*

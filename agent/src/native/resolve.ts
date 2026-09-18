@@ -45,6 +45,7 @@ export interface ResolvedFns {
     setPlayEnable: NativeFunction<any, any>;     // (u8 enable)
     exportInit: NativeFunction<any, any>;        // (u32 flag) -> int
     exportBack: NativeFunction<any, any>;        // () -> int
+    getPlayInfo: NativeFunction<any, any>;       // (count*, ready*) -> int (streaming)
     // SPU replay setters
     setWaveRange: NativeFunction<any, any>;      // (6 x u32)
     setTxInfo: NativeFunction<any, any>;         // (2 x u32)
@@ -121,6 +122,7 @@ export function ensureResolved(model?: string, fwVersion?: string): ResolvedFns 
         setPlayEnable: nf("setPlayEnable", "void", ["uint8"]),
         exportInit: nf("exportInit", "int", ["uint32"]),
         exportBack: nf("exportBack", "int", []),
+        getPlayInfo: nf("getPlayInfo", "int", ["pointer", "pointer"]),
         setWaveRange: nf("setWaveRange", "void",
             ["uint32", "uint32", "uint32", "uint32", "uint32", "uint32"]),
         setTxInfo: nf("setTxInfo", "void", ["uint32", "uint32"]),

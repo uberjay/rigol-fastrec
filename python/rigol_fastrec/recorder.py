@@ -159,6 +159,46 @@ class WaveRecorder:
             transport=transport, progress=progress)
         return out[requested[0]] if len(requested) == 1 else out
 
+    def stream(self, *, channels=None, channel: int | None = None,
+               crop=None, sample_bits: int = 16, transport: str = "raw",
+               batch: int = 0):
+        """Continuously stream frames, agent-driven. Yields one frame per
+        recorded waveform until the caller stops iterating (break / close).
+
+        The agent owns the capture loop and overlaps each batch's send with the
+        next batch's capture, so this is true streaming, not a run()/read() loop.
+        `channel=N` (or `channels=[N]`) yields bare ndarrays; `channels=[a,b]`
+        yields `{ch: ndarray}` dicts. Defaults to the trace channels. Raw
+        encodings only (`sample_bits` 16/8, `transport` raw/packed); no averaging.
+        `batch` caps frames per FPGA capture (<=0 → the hardware max); the agent
+        sizes each capture below that to the trigger rate, so sparse triggers
+        arrive one at a time and fast ones in batches.
+
+        configure() must have been called. The agent captures directly (it does
+        not use run()/wait_recorded()), so feed triggers continuously (a
+        repetitive / AUTO-triggered signal, or your DUT firing in a loop).
+        """
+        if channel is not None and channels is not None:
+            raise ValueError("pass either channel= or channels=, not both")
+        if channel is not None:
+            requested = [int(channel)]
+        elif channels is not None:
+            requested = [int(c) for c in channels]
+        else:
+            enabled = self.channel_layout().enabled
+            requested = [c for c in enabled if c != self._trigger_chan] \
+                or list(enabled)
+        if not requested:
+            raise ValueError("no channels to stream")
+
+        log.debug("stream: channels=%s crop=%s sample_bits=%d transport=%s batch=%d",
+                  requested, crop, sample_bits, transport, batch)
+        single = len(requested) == 1
+        for frame in self._rb.stream(
+                samples_per_frame=self._mdep, channels=requested, crop=crop,
+                sample_bits=sample_bits, transport=transport, batch=batch):
+            yield frame[requested[0]] if (single and isinstance(frame, dict)) else frame
+
     # --- volts conversion --------------------------------------------------
 
     def to_volts(self, codes, channel: int):

@@ -41,6 +41,40 @@ The agent is TypeScript compiled with `frida-compile` into the committed
   bottleneck. The win is in shipping fewer or denser bytes (crop, average,
   `sample_bits`/`transport`).
 
+### Continuous streaming
+
+`stream()` moves the capture loop into the agent, so there is no host round trip
+per batch. Per batch the agent stops the engine, arms a capture (`SetRun` mode 2,
+up to `dwMaxFrameCount` frames), polls `getPlayInfo` until the hardware reports
+the batch recorded (re-arming every 200 ms in case the arm missed a trigger
+edge), arms the replay (`SetRun` mode 4) and DMAs the batch, then arms the next
+capture before handing the batch to the C send path. The FPGA records batch k+1
+while the wire drains batch k.
+
+`getPlayInfo` reports ready as soon as the first frame of a capture lands, and
+its count then tracks frames as they arrive, so the loop waits for the count to
+reach the arm size rather than for ready. Stopping a capture mid-flight to
+replay a partial batch stalls the engine for 10 to 20 ms, while a capture that
+completed on its own stops in about 1 ms, so the arm size adapts: start at one
+frame, double while full batches land within 25 ms and frames arrive within
+10 ms of each other, and on a partial batch (delivered after 50 ms, or 20 ms
+without a new frame) drop to three quarters of what arrived. Sparse triggers
+settle at one frame per capture; fast ones grow toward the cap and saturate the
+wire. The residual loss between 200 Hz and 1 kHz is the 1 to 3 ms between a
+capture completing and the next arm. `tools/stream_batch_probe.py` measures all
+of this against the AFG.
+
+- Status comes from the hardware (`getPlayInfo`), not the software run state:
+  with the playback loop parked nobody updates the latter, so it goes stale.
+- The stop between capture and replay is required. Without it the first replay
+  works and every later one short-reads.
+- The whole stream runs inside the same export bracket as `read()`
+  (`SetPlayEnable(0)` + `ExportInit` on entry, `ExportBack` + `SetPlayEnable(1)`
+  on exit), so the scope's own acquisition and display are frozen until the
+  stream stops. The SCPI `ExportData` snapshot path is unusable for this: it
+  returns the same stale data on every call.
+- Raw encodings only; averaging is not in the stream path.
+
 ## Fail-closed firmware safety
 
 Every native offset (`dwMaxFrameCount`, the SPU-setup symbols, the `SetRun` arg

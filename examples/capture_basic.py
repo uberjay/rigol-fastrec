@@ -10,7 +10,7 @@ acquisition you wire a trigger source and fire N triggers between ``run()`` and
     python examples/capture_basic.py --host 10.0.80.80 --frames 64 \
         --samples 1000 --sample-rate 1e9 --out /tmp/frames.npy
 
-Requires the rigol-fastrec package importable (``pip install -e python`` or
+Requires the rigol-fastrec package importable (``pip install -e .`` or
 PYTHONPATH=python) and the scope reachable over SCPI (5555) + Frida (27042).
 """
 

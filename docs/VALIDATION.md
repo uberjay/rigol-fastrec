@@ -6,10 +6,13 @@ checked against real hardware. `tools/validate_scope.py` does that.
 
 ## Prerequisites
 
-- Package installed: `pip install -e python` (the agent bundle is committed).
+- Package installed: `pip install -e .` (the agent bundle is committed).
 - Scope reachable over SCPI (`:5555`) and frida-server running on it (`:27042`).
 - For the lane-mapping check: the scope's built-in AFG, with its output cabled
-  to one input channel (any BNC cable, scope output → channel input).
+  to one input channel (any BNC cable, scope output → channel input). The
+  defaults assume a dual-output AFG with AFG1 (`:SOURce1`) on CHAN1 and AFG2
+  (`:SOURce2`) on CHAN3, and nothing on CHAN2 (the undriven cross-talk
+  witness). Pass `--afg-channel2 0` for a single-output AFG.
 
 ## What it checks
 
@@ -56,14 +59,35 @@ python tools/validate_scope.py --host mho98.oodles.be \
     --channels 1,2,4 --afg-channel 1 --afg-channel2 4
 ```
 
+Streaming (agent-driven continuous capture; skip with `--no-stream`):
+
+| Check | Proves |
+|---|---|
+| stream raw shape/dtype | each yielded frame is `(mdep,)` `uint16` |
+| stream re-captures (frames vary) | consecutive frames differ, so the loop re-arms instead of replaying a stale buffer |
+| stream + packed / + 8-bit / + crop | the raw encodings and crop work on the stream path |
+| stream multichannel demux | `stream(channels=[a,b,c])` yields `{ch: array}` with every channel |
+| stream CHAN*n* reconstructs *f* | the streamed frequency matches the AFG (needs the AFG) |
+| read() works after stream | export mode is restored once the stream stops |
+
+Each stream check pulls `--stream-frames` frames (default 8) and stops. AUTO
+sweep keeps triggers flowing, so no DUT is needed.
+
 ## Running it
 
 ```bash
-# self-consistency only, no cabling, fastest sanity check
+# full default run: AFG1 → CHAN1, AFG2 → CHAN3, nothing on CHAN2; channels 1,2,3
+# (4-channel FPGA mode, dual-source cross-talk, every combination, streaming)
+python tools/validate_scope.py --host mho98.oodles.be
+
+# self-consistency + streaming only, no cabling
 python tools/validate_scope.py --host mho98.oodles.be --no-afg
 
-# full run: AFG cabled into CHAN1, validate channels 1 and 3
-python tools/validate_scope.py --host mho98.oodles.be --channels 1,3 --afg-channel 1
+# single-output AFG cabled to CHAN1
+python tools/validate_scope.py --host mho98.oodles.be --afg-channel2 0
+
+# skip the streaming checks
+python tools/validate_scope.py --host mho98.oodles.be --no-stream
 ```
 
 The lane-mapping cases that matter most are 3 to 4 enabled channels (4-channel
@@ -73,11 +97,36 @@ channel at its physical lane and leaves a gap for the disabled one
 
 ```bash
 # {1,2,4}: CH3 disabled → gap at lane 2, so CH4 sits at physical lane 3 (not a packed lane 2)
-python tools/validate_scope.py --host mho98.oodles.be --channels 1,2,4 --afg-channel 4
+python tools/validate_scope.py --host mho98.oodles.be \
+    --channels 1,2,4 --afg-channel 1 --afg-channel2 4
 ```
 
-Re-cable the AFG to each channel in turn (and vary `--channels`) to cover the
-combinations you care about. Exit code is non-zero if any check fails.
+Re-cable the AFG to each channel in turn (and vary `--channels`; every AFG
+channel must be in the enabled set) to cover the combinations you care about.
+Exit code is non-zero if any check fails.
+
+### Stream batching against trigger rate
+
+`tools/stream_batch_probe.py` measures the stream loop's adaptive batch sizing.
+It drives a square wave from AFG1 into CHAN1 and triggers on it in NORM sweep,
+so the trigger rate equals the AFG frequency, then streams for a few seconds per
+(rate, batch) case and timestamps every frame. Frames inside one batch arrive
+back to back, so arrival gaps recover the batch sizes; frames per second against
+the trigger rate shows loss; identical consecutive frames would mean a stale
+replay. Run it after touching `waitCaptured` or the arm-size adaptation:
+
+```bash
+python tools/stream_batch_probe.py --host mho98.oodles.be
+python tools/stream_batch_probe.py --host mho98.oodles.be \
+    --rates 50,200,1000,10000 --batches 1,16,0
+```
+
+Expected on the MHO98 at 1000 samples with the default cap: every trigger up to
+about 150 Hz, about 96% at 200 Hz, about 91% at 1 kHz, and the wire limit
+(about 5300 frames/s) at 10 kHz. The probe also prints the agent's `stream poll`
+telemetry (the first transitions of each stream), which shows the
+`getPlayInfo` count advancing and why each batch was released (full, fill
+timeout, or quiet timeout).
 
 ### First run: confirm the AFG SCPI
 

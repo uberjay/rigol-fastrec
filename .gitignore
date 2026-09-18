@@ -8,10 +8,11 @@ agent/dist/
 __pycache__/
 *.py[cod]
 .venv/
+.direnv/
 venv/
 *.egg-info/
 build/
-python/dist/
+dist/
 
 # The built agent bundle (python/rigol_fastrec/_agent.js) IS committed, so users
 # need no Node to run it; `npm run build` writes it directly. It's the only
