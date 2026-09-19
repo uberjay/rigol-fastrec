@@ -19,7 +19,8 @@ saturated. (For the underlying `ScpiControl`/`Readback` layers, use `rec.scpi` /
 ## Lifecycle
 
 ```python
-WaveRecorder(host, *, data_port=5028, frida_port=27042)
+WaveRecorder(host, *, data_port=5028, frida_port=27042,
+             ensure_frida_server=False, adb="adb", adb_port=55555)
 ```
 
 Use it as a context manager -- `__enter__` opens the SCPI socket (and runs the
@@ -33,6 +34,16 @@ with WaveRecorder(host="10.0.80.80") as rec:
 
 Raises `ScopeNotFound` (can't reach the scope / frida-server) or
 `UnsupportedFirmware` (model/firmware not whitelisted) on entry.
+
+`ensure_frida_server=True` opts in to starting the scope's frida-server over
+ADB when it isn't answering, between the `*IDN?` check and the Frida attach.
+It only starts a binary that is already installed at `/data/local/tmp` with
+a version compatible with the host `frida` package (same major.minor); it never downloads or replaces
+one, and it does nothing when a server already answers. A missing or
+mismatched binary raises `FridaServerError` naming the install command,
+`python -m rigol_fastrec.frida_server --host HOST`, which is the one place that
+downloads and pushes. `adb` and `adb_port` apply only to this step. Off by
+default, so nothing touches the scope over ADB unless asked.
 
 ## `configure(*, samples, sample_rate, trigger, trigger_offset_us=0.0, channels=None)`
 
@@ -295,6 +306,9 @@ implicit settings.
 All subclass `RigolFastrecError`:
 
 - `ScopeNotFound`: scope / frida-server unreachable, or process not found.
+- `FridaServerError`: the opt-in ADB provisioning/start of frida-server failed
+  (adb missing or unreachable, download failed, binary missing or incompatible,
+  server never answered).
 - `UnsupportedFirmware`: model/firmware not on the whitelist (host or agent).
 - `MetadataError`: missing/inconsistent acquisition metadata or invalid archive.
 - `ScalingError` (also a `MetadataError`): missing/invalid waveform scaling or

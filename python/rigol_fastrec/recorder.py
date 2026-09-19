@@ -29,10 +29,22 @@ log = logging.getLogger("rigol_fastrec.recorder")
 
 class WaveRecorder:
     def __init__(self, host: str, *, data_port: int = 5028,
-                 frida_port: int = 27042) -> None:
+                 frida_port: int = 27042, ensure_frida_server: bool = False,
+                 adb: str = "adb", adb_port: int = 55555) -> None:
+        """``ensure_frida_server=True`` opts in to starting the scope's
+        frida-server over ADB on ``__enter__`` when it isn't answering. It only
+        starts a binary that is already installed with the version matching
+        the host ``frida`` package; it never downloads or replaces one (that is
+        ``python -m rigol_fastrec.frida_server --host HOST``). Off by default:
+        nothing touches the scope over ADB unless asked. ``adb``/``adb_port``
+        apply only to that step."""
+        self._host = host
         self._scpi = ScpiControl(host)
         self._rb = Readback(host, data_port=data_port,
                             frida_port=frida_port)
+        self._frida_port = frida_port
+        self._ensure_frida_server = bool(ensure_frida_server)
+        self._adb, self._adb_port = adb, adb_port
         self._mdep: int = 0          # snapped :ACQ:MDEP — PER CHANNEL
         self._trigger_chan: int | None = None
         self._max_frames: int = 0    # FMAX cached at configure() (depth-dependent)
@@ -53,8 +65,14 @@ class WaveRecorder:
         return self._rb
 
     def __enter__(self) -> "WaveRecorder":
-        # SCPI firmware check (*IDN?) first, then Frida attach + agent check.
+        # SCPI firmware check (*IDN?) first, then (opt-in) make sure frida-server
+        # is up, then Frida attach + agent check.
         self._scpi.open()
+        if self._ensure_frida_server:
+            from . import frida_server
+            log.info("%s", frida_server.ensure(
+                self._host, install=False, frida_port=self._frida_port,
+                adb=self._adb, adb_port=self._adb_port))
         self._rb.open(model=self._scpi.model, fw_version=self._scpi.firmware)
         return self
 

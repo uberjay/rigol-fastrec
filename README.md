@@ -42,7 +42,30 @@ change `agent/`; see Toolchain.)
 ## Set up frida-server on the scope
 
 The MHO900 runs Android, so you need a frida-server running on it, reached over
-`adb` (Android Debug Bridge). Push a build matching the host `frida` version
+`adb` (Android Debug Bridge). The package can do the whole thing over ADB (the
+scope exposes it on :55555 with no authentication). Nothing on the scope changes
+persistently: the binary lives in `/data/local/tmp` and is started per boot,
+never wired into the scope's init.
+
+```bash
+# once, and again after upgrading frida on the host: download the matching
+# frida-server build, push it, and start it (needs adb on the host PATH)
+python -m rigol_fastrec.frida_server --host 192.168.1.99
+```
+
+After a scope reboot, run that again, or opt in to letting `WaveRecorder` start
+the installed server itself. The flag only ever starts a binary that is already
+installed with the matching version. It never downloads or replaces one, and it
+does nothing when the server is already answering:
+
+```python
+with WaveRecorder(host="192.168.1.99", ensure_frida_server=True) as rec:
+    ...
+```
+
+`--status` reports the host and scope versions without changing anything.
+
+To do it by hand instead, push a build matching the host `frida` version
 (17.9.x) for `android-arm64`:
 
 ```bash

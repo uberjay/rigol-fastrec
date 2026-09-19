@@ -6,6 +6,20 @@ Notable changes to rigol-fastrec. Format follows
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-09-19
+
+### Added
+- `python -m rigol_fastrec.frida_server --host HOST`: downloads the
+  frida-server build matching the host `frida` package (cached under the user
+  cache directory, or `--server-binary`), pushes it to `/data/local/tmp` over
+  ADB, and starts it. `--status` reports without changing anything. Nothing on
+  the scope is changed persistently.
+- Opt-in `WaveRecorder(host, ensure_frida_server=True)`: starts an installed,
+  version-matched frida-server over ADB on entry when it isn't answering, so a
+  scope reboot no longer needs a manual restart. Never downloads or replaces
+  the binary; a missing or mismatched one raises the new `FridaServerError`
+  naming the install command.
+
 ## [0.3.0] - 2026-09-19
 
 ### Added
@@ -118,7 +132,8 @@ cropping done on the scope. Validated on an MHO98 (firmware `00.01.00`).
 - Self-contained wheel: the Frida agent bundle is committed and ships as package
   data, so installing needs no Node toolchain.
 
-[Unreleased]: https://github.com/uberjay/rigol-fastrec/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/uberjay/rigol-fastrec/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/uberjay/rigol-fastrec/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/uberjay/rigol-fastrec/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/uberjay/rigol-fastrec/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/uberjay/rigol-fastrec/releases/tag/v0.1.0

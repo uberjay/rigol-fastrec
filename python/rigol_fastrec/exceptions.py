@@ -11,6 +11,13 @@ class ScopeNotFound(RigolFastrecError):
     """The scope / its Frida agent process could not be reached."""
 
 
+class FridaServerError(RigolFastrecError):
+    """Provisioning or starting frida-server on the scope over ADB failed
+    (adb missing/unreachable, download failed, binary missing or mismatched,
+    server did not come up). Raised by ``rigol_fastrec.frida_server`` and by
+    ``WaveRecorder(ensure_frida_server=True)``."""
+
+
 class UnsupportedFirmware(RigolFastrecError):
     """The scope or its libscope-auklet.so is not a supported MHO900 build.
 

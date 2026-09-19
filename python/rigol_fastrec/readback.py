@@ -93,7 +93,9 @@ class Readback:
         except Exception as e:   # frida errors subclass Exception (no common base)
             raise ScopeNotFound(
                 f"can't reach frida-server at {self._host}:{self._frida_port}: "
-                f"{type(e).__name__}: {e}") from e
+                f"{type(e).__name__}: {e} (WaveRecorder(..., ensure_frida_server=True) "
+                f"starts an installed frida-server over ADB; "
+                f"python -m rigol_fastrec.frida_server --host {self._host} installs it)") from e
 
         # Match the target process by name, with a fuzzy fallback so a renamed
         # build is found (and the error lists what's actually there).

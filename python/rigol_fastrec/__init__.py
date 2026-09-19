@@ -12,6 +12,7 @@ from .config import Channel, ChannelLayout, Trigger
 from .capture import AcquisitionMetadata, Capture, CaptureMetadata, ChannelMetadata, WaveformPreamble
 from .exceptions import (
     AgentError,
+    FridaServerError,
     MetadataError,
     ScalingError,
     ReadbackShortRead,
@@ -32,7 +33,7 @@ from .scpi import ScpiControl
 # logging config.
 logging.getLogger("rigol_fastrec").addHandler(logging.NullHandler())
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 __all__ = [
     "WaveRecorder",
@@ -53,6 +54,7 @@ __all__ = [
     "enable_scpi_logging",
     "RigolFastrecError",
     "ScopeNotFound",
+    "FridaServerError",
     "UnsupportedFirmware",
     "ScopeRunTimeout",
     "ReadbackShortRead",
