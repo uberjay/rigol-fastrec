@@ -61,6 +61,48 @@ no instrument, disables pickle, and validates the schema, channel keys, array
 shape and encoding. Raw codes are retained; voltage conversion remains separate
 and uses the saved preamble even if the live scope has since been reconfigured.
 
+## Optional frame timestamps
+
+```python
+capture = rec.read_capture(count=600, timestamps=True)  # after run + wait_recorded
+capture.save("timed.npz")
+
+loaded = Capture.load("timed.npz")
+ticks = loaded.timestamps.ticks                # uint64, one per frame
+frame_times = loaded.timestamps.relative_seconds()
+intervals = loaded.timestamps.intervals_seconds()
+```
+
+These counters describe the recorded acquisitions, including gaps between
+triggers. Each tick represents 250 ps; the epoch is the scope's hardware counter,
+not UTC. All channels in a frame share one timestamp. `time_axis(channel)`
+remains the sample axis within each frame.
+
+`timestamps=False` is the default and keeps schema 1 files unchanged.
+`timestamps=True` requires `average=1`: averaging combines several acquisitions
+into one waveform, so it has no single frame timestamp in this API. The request
+is rejected before scope I/O if both features are enabled. Crops, channel subsets
+and all raw sample encodings work with timestamping. `stream()` does not collect
+frame timestamps.
+
+Timestamped captures use **schema 2**, retaining the existing metadata and channel
+arrays and adding:
+
+- `frame_timestamp_ticks`: one-dimensional uint64 array, length `read_frames`.
+- `frame_timestamp_metadata`: JSON scalar with `first_frame` (zero for
+  `read_capture()`), `tick_fs` (250000), and `source` (`prefix-register`).
+
+The loader accepts both schemas and checks timestamp count, ordering and frame
+identity. Counter subtraction happens in integers before conversion to seconds,
+so a large counter value does not erase short inter-frame intervals. Timestamp
+arrays own immutable storage and remain valid after reconfiguration or closure.
+
+Collection adds a second replay of 32 samples per enabled channel with a 10 µs
+replay interval. It runs after normal waveform transfer and does not change
+acquisition timing. Default reads do none of this work. See
+[RAW_TIMESTAMPS.md](RAW_TIMESTAMPS.md) for counter reconstruction and hardware
+validation, and [API.md](API.md) for telemetry.
+
 ## Configuration and consistency checks
 
 Input impedance is now explicit: `Channel(impedance=1e6)` is the default;
@@ -117,7 +159,7 @@ and `host_read_utc` fields record when the host finished arming and readback.
 
 ## Hardware checks
 
-`tools/validate_scope.py` automates the impedance, record integrity, AFG
+`python -m tools.validate_scope` automates the impedance, record integrity, AFG
 scaling, gapped-channel layout and offline archive checks below. Its default
 wiring is AFG1 → CH1 and AFG2 → CH3; use `--output-dir` to retain JSON results and
 NPZ evidence. Add `--csv` for automatic same-record Rigol CSV export/comparison

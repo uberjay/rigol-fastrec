@@ -1,4 +1,4 @@
-"""Hardware checks called by validate_scope.py; no independent scope connection."""
+"""Metadata/CSV checks used by tools.validate_scope."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -8,6 +8,8 @@ import tempfile
 import numpy as np
 
 from rigol_fastrec import Capture, Channel, MetadataError, ScalingError, ScopeRunTimeout, Trigger
+
+from .bench import scpi_errors
 
 
 def require(ok, message):
@@ -23,16 +25,6 @@ def expect_error(kind, fn, match=''):
         require(any(text in str(exc) for text in matches), f'unexpected error: {exc}')
         return True, f'{kind.__name__}: {exc}'
     raise AssertionError(f'expected {kind.__name__}, operation succeeded')
-
-
-def scpi_errors(rec):
-    errors = []
-    for _ in range(20):
-        error = rec.scpi.query(':SYSTem:ERRor?')
-        if error.lstrip().startswith('0'):
-            return errors
-        errors.append(error)
-    raise RuntimeError(f'SCPI error queue did not drain: {errors}')
 
 
 def sine_fit(volts, fs, frequency):

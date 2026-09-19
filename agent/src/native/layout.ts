@@ -45,7 +45,7 @@ export function channelLayout(): ChannelLayout {
  *  `chanIdx-1` and gaps are kept (with {1,2,4} enabled, CH4 is at lane 3, not a
  *  dense lane 2). In 1-/2-channel mode the enabled channels are compacted into
  *  the available lanes, so the offset is the dense index (enabled channels
- *  below it). Verified on-scope via tools/validate_scope.py. */
+ *  below it). Verified on-scope via python -m tools.validate_scope. */
 export function chanOffsetWithinEnabled(
         chanIdx: number, enabledMask: number, stride: number): number {
     if (chanIdx < 1) return -1;

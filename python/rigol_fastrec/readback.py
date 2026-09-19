@@ -15,6 +15,7 @@ import threading
 import time
 
 from .agent import load_agent_source
+from .timestamps import FrameTimestamps, validate_timestamp_request
 from .exceptions import AgentError, ReadbackShortRead, ScopeNotFound, UnsupportedFirmware
 
 log = logging.getLogger("rigol_fastrec.readback")
@@ -61,6 +62,7 @@ class Readback:
         self._sock = None        # data socket; opened once, reused across reads
         self.resolved: dict | None = None
         self._last_read_stats: dict | None = None
+        self._last_frame_timestamps: FrameTimestamps | None = None
 
     @property
     def last_read_stats(self) -> dict | None:
@@ -70,6 +72,11 @@ class Readback:
         and DMA time. Returns a copy; no instrument query is performed.
         """
         return None if self._last_read_stats is None else dict(self._last_read_stats)
+
+    @property
+    def last_frame_timestamps(self) -> FrameTimestamps | None:
+        """Timestamps from the last successful opt-in read; otherwise None."""
+        return self._last_frame_timestamps
 
     def open(self, *, model: str | None = None,
              fw_version: str | None = None) -> "Readback":
@@ -159,7 +166,7 @@ class Readback:
              channels: list[int] | tuple[int, ...] = (1,),
              crop: tuple[int, int] | None = None, average: int = 1,
              sample_bits: int = 16, transport: str = "raw",
-             first: int = 0, progress=None) -> dict:
+             first: int = 0, progress=None, timestamps: bool = False) -> dict:
         """Read `count` frames of each channel in `channels`, optionally cropped
         to a sample window and/or averaged in groups of `average`.
 
@@ -178,12 +185,18 @@ class Readback:
             to_volts handles uint8 (lifts it back to the 16-bit domain ×256).
         "packed" requires sample_bits=16; both apply only to raw reads.
 
+        ``timestamps=True`` adds a short-prefix replay pass and exposes one
+        counter value per frame through ``last_frame_timestamps``. Requires
+        ``average=1``. Disabled reads perform no timestamp replay.
+
         Returns ``{channel: ndarray}`` shaped (count // average, out_len):
         uint16 (16-bit) or uint8 (8-bit) when average == 1, else float32 averages.
         """
         import numpy as np
 
         self._last_read_stats = None
+        self._last_frame_timestamps = None
+        validate_timestamp_request(timestamps, average)
         # Validate encoding args up front (before touching the scope).
         if sample_bits not in (16, 8):
             raise ValueError(f"sample_bits must be 16 or 8, got {sample_bits}")
@@ -286,6 +299,7 @@ class Readback:
                 "samplesPerFrame": full, "channels": chans,
                 "cropLo": int(crop_lo), "cropHi": int(crop_hi),
                 "average": k, "outBits": out_bits,
+                **({"timestamps": True} if timestamps else {}),
             }))
         except Exception as e:   # frida surfaces an agent throw here (RPCException)
             agent_exc = e
@@ -329,6 +343,15 @@ class Readback:
             log.debug("DMA (engine read, pre-wire): %.1f MB in %.1f ms = %.1f MB/s "
                       "(%.0f frame/s)", dma_bytes / 1e6, dma_ms,
                       dma_bytes / dma_ms / 1e3, count / dma_ms * 1e3)
+        if timestamps:
+            try:
+                self._last_frame_timestamps = FrameTimestamps.from_status(
+                    status, first=int(first), count=int(count))
+            except Exception as exc:
+                self._close_data_socket()
+                raise AgentError(f"invalid frame timestamps: {exc}") from exc
+            # Avoid retaining a second, string-valued copy of the full vector.
+            status.pop('frameTimestampTicks')
         self._last_read_stats = dict(status)
         return out
 
@@ -475,6 +498,8 @@ class Readback:
         log.debug("data socket closed")
 
     def close(self) -> None:
+        self._last_frame_timestamps = None
+        self._last_read_stats = None
         self._close_data_socket()   # shutdown first → unblocks a stalled agent
         try:
             if self._script is not None:

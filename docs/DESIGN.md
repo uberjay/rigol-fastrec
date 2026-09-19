@@ -61,7 +61,7 @@ frame, double while full batches land within 25 ms and frames arrive within
 without a new frame) drop to three quarters of what arrived. Sparse triggers
 settle at one frame per capture; fast ones grow toward the cap and saturate the
 wire. The residual loss between 200 Hz and 1 kHz is the 1 to 3 ms between a
-capture completing and the next arm. `tools/stream_batch_probe.py` measures all
+capture completing and the next arm. `python -m tools.diagnostics.stream_batches` measures all
 of this against the AFG.
 
 - Status comes from the hardware (`getPlayInfo`), not the software run state:

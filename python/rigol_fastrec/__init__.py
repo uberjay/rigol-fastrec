@@ -22,6 +22,7 @@ from .exceptions import (
 )
 from .logconf import enable_logging, enable_scpi_logging
 from .readback import Readback
+from .timestamps import FrameTimestamps
 from .recorder import WaveRecorder
 from .scpi import ScpiControl
 
@@ -31,7 +32,7 @@ from .scpi import ScpiControl
 # logging config.
 logging.getLogger("rigol_fastrec").addHandler(logging.NullHandler())
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 __all__ = [
     "WaveRecorder",
@@ -45,6 +46,7 @@ __all__ = [
     "AcquisitionMetadata",
     "CaptureMetadata",
     "Capture",
+    "FrameTimestamps",
     "MetadataError",
     "ScalingError",
     "enable_logging",

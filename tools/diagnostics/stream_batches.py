@@ -23,23 +23,24 @@ Reading the numbers:
 * frames << rate * elapsed: re-arms are discarding partial captures.
 * 0 frames (TimeoutError): the loop never sees ready at this rate.
 
-    python tools/stream_batch_probe.py --host 10.0.10.213
-    python tools/stream_batch_probe.py --host 10.0.10.213 --rates 2,10 --batches 1,4
+    python -m tools.diagnostics.stream_batches --host 10.0.10.213
+    python -m tools.diagnostics.stream_batches --host 10.0.10.213 --rates 2,10 --batches 1,4
 """
 
 from __future__ import annotations
 
 import argparse
 import logging
+import math
+from pathlib import Path
 import sys
 import time
 
 import numpy as np
 
-sys.path.insert(0, __file__.rsplit("/", 1)[0])
-from validate_scope import afg_setup, afg_off  # noqa: E402
-
-from rigol_fastrec import WaveRecorder, Trigger, Channel  # noqa: E402
+from rigol_fastrec import WaveRecorder, Trigger, Channel
+from .._support.bench import (Validator, afg_setup, managed_afg,
+                             validation_session, evidence_metadata, scpi_errors)
 
 
 class _StreamStartFilter(logging.Filter):
@@ -66,8 +67,9 @@ def run_case(rec: WaveRecorder, *, channel: int, batch: int, seconds: float,
     err = None
     t0 = time.monotonic()
     deadline = t0 + seconds
+    stream = rec.stream(channel=channel, batch=batch)
     try:
-        for frame in rec.stream(channel=channel, batch=batch):
+        for frame in stream:
             now = time.monotonic()
             t_arrive.append(now)
             if prev is not None and np.array_equal(prev, frame):
@@ -79,6 +81,8 @@ def run_case(rec: WaveRecorder, *, channel: int, batch: int, seconds: float,
         err = f"TimeoutError (no frame within the 20 s socket watchdog): {e}"
     except Exception as e:  # noqa: BLE001
         err = f"{type(e).__name__}: {e}"
+    finally:
+        stream.close()
     elapsed = time.monotonic() - t0
 
     n = len(t_arrive)
@@ -121,14 +125,37 @@ def main() -> int:
     p.add_argument("--batches", default="1,4,0",
                    help="stream batch sizes to probe (0 = hardware max)")
     p.add_argument("--seconds", type=float, default=6.0, help="stream time per case")
+    p.add_argument('--output-dir', type=Path, help='new directory for JSON measurements and cleanup results')
     args = p.parse_args()
 
-    rates = [float(r) for r in args.rates.split(",") if r.strip()]
-    batches = [int(b) for b in args.batches.split(",") if b.strip()]
+    try:
+        rates = [float(r) for r in args.rates.split(",") if r.strip()]
+        batches = [int(b) for b in args.batches.split(",") if b.strip()]
+    except ValueError:
+        p.error('--rates and --batches must be comma-separated numbers')
+    if not rates or any(not math.isfinite(r) or r <= 0 for r in rates):
+        p.error('--rates must contain finite positive frequencies')
+    if not batches or any(b < 0 for b in batches):
+        p.error('--batches must contain nonnegative integers')
+    if not math.isfinite(args.seconds) or args.seconds <= 0:
+        p.error('--seconds must be finite and positive')
+    if args.afg_channel not in (1, 2, 3, 4):
+        p.error('--afg-channel must be 1..4')
+    if args.output_dir is not None:
+        try:
+            args.output_dir.mkdir(parents=True, exist_ok=False)
+        except OSError as exc:
+            p.error(f'cannot create new output directory: {exc}')
+    v = Validator(args.output_dir)
+    v.report.update(evidence_metadata(args), cases=[])
+    v.save_report()
     ch = args.afg_channel
     hook_agent_stream_start()
 
-    with WaveRecorder(host=args.host) as rec:
+    with validation_session(v), WaveRecorder(host=args.host) as rec, managed_afg(
+            rec, v, [(args.afg_prefix, ch, 0)]):
+        v.report['instrument'] = rec.scpi.idn
+        v.save_report()
         rec.configure(samples=args.samples, sample_rate=args.sample_rate,
                       trigger=Trigger(source=f"CHAN{ch}", level=0.0, slope="POS",
                                       channel_range=4.0),
@@ -139,43 +166,45 @@ def main() -> int:
               f"samples/frame={lay.samples_per_frame}, stride={lay.stride}, "
               f"FMAX={rec.max_frames()}")
 
-        try:
-            for rate in rates:
+        for rate in rates:
+            errs = afg_setup(rec, prefix=args.afg_prefix, freq=rate,
+                             vpp=args.afg_vpp, offset=0.0, wave=args.wave)
+            wave = args.wave
+            if errs and args.wave != "SIN":
+                print(f"  AFG rejected {errs}; falling back to SIN")
+                wave = "SIN"
                 errs = afg_setup(rec, prefix=args.afg_prefix, freq=rate,
-                                 vpp=args.afg_vpp, offset=0.0, wave=args.wave)
-                wave = args.wave
-                if errs and args.wave != "SIN":
-                    print(f"  AFG rejected {errs}; falling back to SIN")
-                    wave = "SIN"
-                    errs = afg_setup(rec, prefix=args.afg_prefix, freq=rate,
-                                     vpp=args.afg_vpp, offset=0.0, wave=wave)
-                if errs:
-                    print(f"  AFG errors: {errs}")
-                time.sleep(0.5)
-                print(f"\ntrigger rate {rate:g} Hz ({wave}, period {1e3 / rate:.0f} ms):")
-                for batch in batches:
-                    print(f"  batch={batch}:")
-                    r = run_case(rec, channel=ch, batch=batch,
-                                 seconds=args.seconds, rate=rate)
-                    if r["err"]:
-                        print(f"    {r['err']}")
-                    b = r["bursts"]
-                    g = r["gaps"]
-                    print(f"    frames={r['frames']} in {r['elapsed']:.1f} s "
-                          f"(expected ~{r['expected']:.0f} at {rate:g} Hz); "
-                          f"first frame after {r['first_at']:.2f} s"
-                          if r["first_at"] is not None else
-                          f"    frames=0 in {r['elapsed']:.1f} s")
-                    if b:
-                        print(f"    bursts={len(b)} size min/med/max="
-                              f"{min(b)}/{int(np.median(b))}/{max(b)}; "
-                              f"inter-burst gap med={np.median(g) * 1e3:.0f} ms"
-                              if g else
-                              f"    bursts=1 size={b[0]} (single burst)")
-                    print(f"    consecutive identical frames: {r['dups']}")
-        finally:
-            afg_off(rec, prefix=args.afg_prefix)
-    return 0
+                                 vpp=args.afg_vpp, offset=0.0, wave=wave)
+            if not v.check(f'AFG setup at {rate:g} Hz', not errs, str(errs)):
+                continue
+            time.sleep(0.5)
+            print(f"\ntrigger rate {rate:g} Hz ({wave}, period {1e3 / rate:.0f} ms):")
+            for batch in batches:
+                print(f"  batch={batch}:")
+                r = run_case(rec, channel=ch, batch=batch,
+                             seconds=args.seconds, rate=rate)
+                v.report['cases'].append(dict(rate_hz=rate, batch=batch, wave=wave, **r))
+                v.check(f'{rate:g} Hz, batch={batch}: received frames',
+                        r['err'] is None and r['frames'] > 0, r['err'] or '')
+                if r["err"]:
+                    print(f"    {r['err']}")
+                b = r["bursts"]
+                g = r["gaps"]
+                print(f"    frames={r['frames']} in {r['elapsed']:.1f} s "
+                      f"(expected ~{r['expected']:.0f} at {rate:g} Hz); "
+                      f"first frame after {r['first_at']:.2f} s"
+                      if r["first_at"] is not None else
+                      f"    frames=0 in {r['elapsed']:.1f} s")
+                if b:
+                    print(f"    bursts={len(b)} size min/med/max="
+                          f"{min(b)}/{int(np.median(b))}/{max(b)}; "
+                          f"inter-burst gap med={np.median(g) * 1e3:.0f} ms"
+                          if g else
+                          f"    bursts=1 size={b[0]} (single burst)")
+                print(f"    consecutive identical frames: {r['dups']}")
+        errors = scpi_errors(rec)
+        v.check('SCPI error queue', not errors, str(errors))
+    return v.summary()
 
 
 if __name__ == "__main__":

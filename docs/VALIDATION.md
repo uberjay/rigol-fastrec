@@ -1,8 +1,16 @@
 # On-scope validation
 
+See [tools/README.md](../tools/README.md) for the tool index, wiring, report
+provenance and firmware-update workflow. Run commands below from the repo root.
+
 The offline tests (`pytest`) cover only the host-side logic. The DMA,
 deinterleave, crop, and averaging all run on the scope, so they can only be
-checked against real hardware. `tools/validate_scope.py` does that.
+checked against real hardware. `python -m tools.validate_scope` does that.
+
+The tool reorganization was verified with **179 offline tests**, CLI help/import
+checks for all six commands, and JavaScript syntax checks for both diagnostic
+payloads. Hardware measurements below are from the recorded runs before that
+reorganization.
 
 ## Verified run: 2026-09-18
 
@@ -18,7 +26,7 @@ The host offline suite passed **107 tests**; three agent export-lifecycle tests
 and the TypeScript check also passed.
 
 ```bash
-python tools/validate_scope.py --csv --output-dir /tmp/scope-validation -v
+python -m tools.validate_scope --csv --output-dir /tmp/scope-validation -v
 ```
 
 The default run uses 600 frames with averaging groups of 7. Actual readback
@@ -27,6 +35,52 @@ the largest observed mean difference was 0.00335 codes. In the 1 Vpp metadata
 checks, CH1/CH3 sine fits were approximately 0.987/0.986 Vpp at 1 Mohm and
 0.982/0.979 Vpp at 50 ohms. Raw captures and full results are emitted by
 `--output-dir`.
+
+## Optional timestamp API — 2026-09-19
+
+`python -m tools.validate_timestamps` passed **235/235 checks**, including 70 timestamped
+reads and 7,985 exact comparisons with full-register reference tags. It covers
+channel layouts, depth through one million samples/frame, repeated and subset
+reads, crops/encodings, timestamped NPZ archives, a deliberate trigger gap,
+averaging rejection and unchanged ordinary averaging. The 10,000-frame read
+with `average=1000` retained 500-frame DMA chunks and no timestamp pass. A separate
+80-read-per-agent comparison with `40bf48a` found no measurable default-path
+regression: 134.6 ms committed versus 133.4 ms current median host time, with
+byte-identical averages.
+
+```bash
+python -m tools.validate_timestamps --host 10.0.10.213 \
+    --repeats 4 --output-dir /tmp/timestamp-api-validation
+```
+
+The output directory must be new. Wiring is AFG1 → CH1. Both AFG outputs are
+owned for the duration and disabled on exit. Saved reports contain each read's
+options, elapsed time and DMA/timestamp telemetry; NPZ files preserve the
+waveforms and uint64 counters. See [RAW_TIMESTAMPS.md](RAW_TIMESTAMPS.md) for
+measured costs. Offline validation passes **164 Python tests and 10 agent tests**,
+including counter wrap and full-register fallback cases.
+
+## Frame timestamp experiment
+
+`python -m tools.diagnostics.frame_timestamps` exercises per-frame elapsed timestamps at 2 Hz,
+137 Hz and 13.7 kHz, plus a 20 Hz recording with a deliberate gap. The
+2026-09-18 run passed **34/34 checks**, including repeated frame selection,
+SCPI/native agreement, unchanged raw captures and AFG cleanup. See
+[FRAME_TIMESTAMPS.md](FRAME_TIMESTAMPS.md) for the 300 ms refresh behavior,
+integer timestamp path, measured results and repeatable command.
+
+The [raw timestamp readback study](RAW_TIMESTAMPS.md) passed **72/72 checks**,
+including full tag comparisons, encodings, averaging, subsets and recovery.
+Run it with `python -m tools.diagnostics.register_timestamps`; its agent option uses a register
+read after each frame DMA and leaves normal multi-frame readback unchanged.
+
+`python -m tools.diagnostics.replay_headers --study trace` records native Frida calls while
+varying replay pacing, early polling, settling and DMA chunking. Full-depth
+headers reproduce a timestamp association failure with unchanged waveform data.
+`--study prefix` tests a separate 32-sample bulk timestamp pass: 138 reads and
+19,090 tag comparisons passed across the expanded and packaged-tool runs,
+including a deliberate trigger gap. One DMA attempt required a retry. See the
+same study for timing, Ghidra findings and transfer-state restoration.
 
 ## Prerequisites
 
@@ -79,7 +133,7 @@ test, and the case worth hitting is again a non-contiguous enable set:
 
 ```bash
 # CH1 @ 12 MHz and CH4 @ 7 MHz, both read in one pass; {1,2,4} → 4-ch mode
-python tools/validate_scope.py --host 10.0.10.213 \
+python -m tools.validate_scope --host 10.0.10.213 \
     --channels 1,2,4 --afg-channel 1 --afg-channel2 4
 ```
 
@@ -131,23 +185,23 @@ that the configured value is preserved in capture metadata.
 ```bash
 # full default run: AFG1 → CHAN1, AFG2 → CHAN3, nothing on CHAN2; channels 1,2,3
 # (4-channel FPGA mode, dual-source cross-talk, every combination, streaming)
-python tools/validate_scope.py --host 10.0.10.213
+python -m tools.validate_scope --host 10.0.10.213
 
 # retain JSON results and sample/metadata archives in a NEW directory
-python tools/validate_scope.py --host 10.0.10.213 --output-dir /tmp/scope-validation
+python -m tools.validate_scope --host 10.0.10.213 --output-dir /tmp/scope-validation
 
 # only the metadata/measurement checks, or only the previous groups
-python tools/validate_scope.py --metadata-only --output-dir /tmp/scope-metadata
-python tools/validate_scope.py --no-metadata
+python -m tools.validate_scope --metadata-only --output-dir /tmp/scope-metadata
+python -m tools.validate_scope --no-metadata
 
 # self-consistency + streaming only, no cabling
-python tools/validate_scope.py --host 10.0.10.213 --no-afg
+python -m tools.validate_scope --host 10.0.10.213 --no-afg
 
 # single-output AFG cabled to CHAN1
-python tools/validate_scope.py --host 10.0.10.213 --afg-channel2 0
+python -m tools.validate_scope --host 10.0.10.213 --afg-channel2 0
 
 # skip the streaming checks
-python tools/validate_scope.py --host 10.0.10.213 --no-stream
+python -m tools.validate_scope --host 10.0.10.213 --no-stream
 ```
 
 The lane-mapping cases that matter most are 3 to 4 enabled channels (4-channel
@@ -157,7 +211,7 @@ channel at its physical lane and leaves a gap for the disabled one
 
 ```bash
 # {1,2,4}: CH3 disabled → gap at lane 2, so CH4 sits at physical lane 3 (not a packed lane 2)
-python tools/validate_scope.py --host 10.0.10.213 \
+python -m tools.validate_scope --host 10.0.10.213 \
     --channels 1,2,4 --afg-channel 1 --afg-channel2 4
 ```
 
@@ -175,7 +229,7 @@ configuration. No cables need to move during a default run.
 
 ### Stream batching against trigger rate
 
-`tools/stream_batch_probe.py` measures the stream loop's adaptive batch sizing.
+`python -m tools.diagnostics.stream_batches` measures the stream loop's adaptive batch sizing.
 It drives a square wave from AFG1 into CHAN1 and triggers on it in NORM sweep,
 so the trigger rate equals the AFG frequency, then streams for a few seconds per
 (rate, batch) case and timestamps every frame. Frames inside one batch arrive
@@ -184,8 +238,8 @@ the trigger rate shows loss; identical consecutive frames would mean a stale
 replay. Run it after touching `waitCaptured` or the arm-size adaptation:
 
 ```bash
-python tools/stream_batch_probe.py --host 10.0.10.213
-python tools/stream_batch_probe.py --host 10.0.10.213 \
+python -m tools.diagnostics.stream_batches --host 10.0.10.213
+python -m tools.diagnostics.stream_batches --host 10.0.10.213 \
     --rates 50,200,1000,10000 --batches 1,16,0
 ```
 
@@ -252,7 +306,7 @@ memory is unchanged. See [CSV_EXPORT.md](CSV_EXPORT.md) for the corrected save
 command, temporary firmware source selection, file handling and comparison limits.
 
 ```bash
-python tools/validate_scope.py --host 10.0.10.213 --csv \
+python -m tools.validate_scope --host 10.0.10.213 --csv \
     --output-dir /tmp/scope-csv-validation
 ```
 

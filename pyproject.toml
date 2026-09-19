@@ -60,3 +60,4 @@ only-include = [
 
 [tool.pytest.ini_options]
 testpaths = ["python/tests"]
+pythonpath = ["."]  # checkout-only tools use normal package imports

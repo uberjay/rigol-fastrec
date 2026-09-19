@@ -13,6 +13,7 @@ from pathlib import Path
 import numpy as np
 
 from .config import Channel
+from .timestamps import FrameTimestamps
 from .exceptions import MetadataError, ScalingError
 
 
@@ -148,7 +149,7 @@ class CaptureMetadata:
     def from_dict(cls, value: dict) -> CaptureMetadata:
         try:
             v = dict(value)
-            if v.get('schema_version') != 1:
+            if v.get('schema_version') not in (1, 2):
                 raise ValueError("unsupported capture schema")
             acq = dict(v['acquisition'])
             acq['channels'] = tuple(ChannelMetadata(
@@ -167,11 +168,18 @@ class Capture:
     """Channel arrays plus their acquisition snapshot; independent of live state."""
     samples: dict[int, np.ndarray]
     metadata: CaptureMetadata
+    timestamps: FrameTimestamps | None = None
 
     def __post_init__(self) -> None:
         m = self.metadata
-        if m.schema_version != 1:
+        if m.schema_version not in (1, 2):
             raise MetadataError("unsupported capture schema")
+        if (m.schema_version == 2) != (self.timestamps is not None):
+            raise MetadataError("schema 2 requires frame timestamps; schema 1 has none")
+        if self.timestamps is not None:
+            if (m.average != 1 or self.timestamps.first_frame != 0
+                    or len(self.timestamps.ticks) != m.read_frames):
+                raise MetadataError("frame timestamps do not match capture frames/averaging")
         if (not m.channels or len(set(m.channels)) != len(m.channels)
                 or set(self.samples) != set(m.channels)):
             raise MetadataError("sample channels do not match metadata")
@@ -229,10 +237,14 @@ class Capture:
         """Save raw arrays + UTF-8 JSON in one NPZ; never overwrite an existing file."""
         self.__post_init__()
         metadata = json.dumps(self.metadata.to_dict(), allow_nan=False)
+        extra = {}
+        if self.timestamps is not None:
+            extra = dict(frame_timestamp_ticks=self.timestamps.ticks,
+                         frame_timestamp_metadata=np.array(json.dumps(self.timestamps.to_dict())))
         # File object prevents numpy silently adding a second '.npz' suffix.
         with Path(path).open('xb') as f:
             np.savez(f, metadata=np.array(metadata),
-                     **{f'ch{ch}': data for ch, data in self.samples.items()})
+                     **{f'ch{ch}': data for ch, data in self.samples.items()}, **extra)
 
     @classmethod
     def load(cls, path: str | Path) -> Capture:
@@ -241,8 +253,13 @@ class Capture:
             with np.load(path, allow_pickle=False) as archive:
                 m = CaptureMetadata.from_dict(json.loads(str(archive['metadata'].item())))
                 expected = {'metadata', *(f'ch{ch}' for ch in m.channels)}
+                timestamps = None
+                if m.schema_version == 2:
+                    expected |= {'frame_timestamp_ticks', 'frame_timestamp_metadata'}
+                    timestamps = FrameTimestamps(archive['frame_timestamp_ticks'],
+                        **json.loads(str(archive['frame_timestamp_metadata'].item())))
                 if set(archive.files) != expected:
                     raise MetadataError("unexpected/missing capture arrays")
-                return cls({ch: archive[f'ch{ch}'] for ch in m.channels}, m)
+                return cls({ch: archive[f'ch{ch}'] for ch in m.channels}, m, timestamps)
         except (KeyError, TypeError, ValueError) as exc:
             raise MetadataError("invalid capture archive") from exc

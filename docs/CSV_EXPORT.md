@@ -98,7 +98,7 @@ time calculations.
 ## Automated bench coverage
 
 ```bash
-python tools/validate_scope.py --host 10.0.10.213 --csv \
+python -m tools.validate_scope --host 10.0.10.213 --csv \
     --output-dir /tmp/scope-csv-validation
 ```
 

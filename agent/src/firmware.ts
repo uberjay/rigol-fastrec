@@ -47,6 +47,7 @@ const MHO98_SYMBOLS = {
     // reports how many frames the FPGA has recorded so far + a ready bit,
     // so the stream loop can pace itself without the SCPI WaveRecord host path.
     getPlayInfo:      "DevSystemScu_getPlayInfo",
+    getRecordTag:     "_Z16DrvRecord_GetTagRy", // per-frame hardware timestamp
     // SPU replay-setup setters (re-issued per chunk with the captured args)
     setWaveRange:     "DevAcquireSPU_SetWaveRange",
     setTxInfo:        "DevAcquireSpu_SetTxInfo",

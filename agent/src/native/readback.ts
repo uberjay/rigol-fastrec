@@ -10,6 +10,7 @@
 // (average=k → float32), crop, and N-channel deinterleave in one DMA pass.
 
 import { ensureResolved, type ResolvedFns } from "./resolve.js";
+import { readFrameTimestamps, restoreTimestampGeometry, type TimestampResult } from "./timestamps.js";
 import { ensureCModule, ST_ERR, ST_FRAMES, ST_BYTES } from "./cmodule.js";
 import { channelLayout, chanOffsetWithinEnabled } from "./layout.js";
 import { acceptOnce, connected as transportConnected } from "../transport.js";
@@ -115,6 +116,10 @@ function readChunk(r: ResolvedFns, scope: NativePointer, args: ArmArgs,
 }
 
 export interface ReadFramesArgs {
+    /** Optional prefix replay pass; mutually exclusive with averaging. */
+    timestamps?: boolean;
+    /** Experiment: exact per-frame register tags, using single-frame replay. */
+    timestampRegisters?: boolean;
     first: number;
     count: number;
     samplesPerFrame: number;   // per-channel sample count (= :ACQ:MDEP)
@@ -125,7 +130,10 @@ export interface ReadFramesArgs {
     outBits: number;      // raw payload width: 16 (u16), 12 (packed 2->3 B), or 8 (u8)
 }
 
-export interface ReadFramesResult {
+export interface ReadFramesResult extends Partial<TimestampResult> {
+    frameTimestampTicks?: string[];
+    timestampTickFs?: number;
+    timestampBits?: number;
     ret: number;
     elapsedTotalMs: number;
     dmaMs: number;
@@ -166,6 +174,7 @@ export function restoreExport(): void {
     if (!inExport) return;
     try {
         const r = ensureResolved();
+        restoreTimestampGeometry();
         r.exportBack();
         r.setPlayEnable(1);
     } catch { /* resolver gone — nothing to restore against */ }
@@ -176,6 +185,12 @@ export function restoreExport(): void {
  *  in-agent averages (float32). Streams <u32 n><payload> per output trace over the
  *  data socket; returns status. Always restores the live playback loop. */
 export function readFrames(a: ReadFramesArgs): ReadFramesResult {
+    if (a.timestamps !== undefined && typeof a.timestamps !== "boolean")
+        throw new Error("timestamps must be boolean");
+    if ((a.timestamps || a.timestampRegisters) && a.average !== 1)
+        throw new Error("timestamps and averaging are mutually exclusive");
+    if (a.timestamps && a.timestampRegisters)
+        throw new Error("select only one timestamp path");
     const r = ensureResolved();
     if (!acceptOnce()) throw new Error("native accept failed (client not connected)");
     enterExport(r);
@@ -212,7 +227,9 @@ function readFramesInner(a: ReadFramesArgs, r: ResolvedFns): ReadFramesResult {
     const k = (a.average | 0) < 1 ? 1 : (a.average | 0);
     const scope = r.drvGetScope() as NativePointer;
 
-    const { chunk, hwMax } = clampChunk(scope, r.profile.offsets, total);
+    const { chunk: normalChunk, hwMax } = clampChunk(scope, r.profile.offsets, total);
+    const timestamps = a.timestampRegisters === true;
+    const chunk = timestamps ? 1 : normalChunk;
     // Emit before the first blocking read so a wedged DMA still logs the chunk.
     send({ type: "fastrec_chunk", msg: `chunk=${chunk} cap=${hwMax} ` +
           `total=${total} k=${k} eng=${eng} nch=${nch}` });
@@ -243,6 +260,10 @@ function readFramesInner(a: ReadFramesArgs, r: ResolvedFns): ReadFramesResult {
     cm.gState.add(ST_FRAMES * 8).writeS64(0);
     cm.gState.add(ST_BYTES * 8).writeS64(0);
 
+    const frameTimestampTicks: string[] | null = timestamps ? [] : null;
+    const tagOut = timestamps ? Memory.alloc(8) : null;
+    const getTag = timestamps ? new NativeFunction(
+        r.module.getExportByName(r.profile.symbols.getRecordTag), "int", ["pointer"]) : null;
     const t0 = Date.now();
     let dmaMs = 0, dmaBytes = 0, retries = 0, failOffset = -1, ret = 0;
     for (let off = 0; off < total; off += chunk) {
@@ -254,6 +275,13 @@ function readFramesInner(a: ReadFramesArgs, r: ResolvedFns): ReadFramesResult {
         if (rc.ret > 0) dmaBytes += n * eng * 2;
         retries += rc.retries;
         if (rc.ret <= 0) { ret = -10; failOffset = base; cm.gState.add(ST_ERR * 8).writeS64(-10); break; }
+        if (timestamps) {
+            // A completed one-frame DMA binds the register to this frame. Read
+            // it before the next replay arm or restoring the display engine.
+            if (rc.ret !== n*eng*2) throw new Error("incomplete timestamp frame DMA");
+            if (getTag!(tagOut!) !== 0) throw new Error("timestamp register read failed");
+            frameTimestampTicks!.push(tagOut!.readU64().toString());
+        }
         const wr = avg
             ? cm.sendAveragedFrames(chunkBuf!, n, eng, s, offsetsBuf, nch,
                           a.cropLo | 0, a.cropHi | 0,
@@ -264,10 +292,17 @@ function readFramesInner(a: ReadFramesArgs, r: ResolvedFns): ReadFramesResult {
         if (wr < 0) { ret = wr; break; }
     }
     const rd = (i: number): number => cm.gState.add(i * 8).readS64().toNumber();
+    let prefixResult: TimestampResult | undefined;
+    if (a.timestamps && ret === 0 && rd(ST_ERR) === 0) {
+        prefixResult = readFrameTimestamps(r, scope, args, a.first, total, s, normalChunk);
+    }
     return {
         ret, elapsedTotalMs: Date.now() - t0, dmaMs, dmaBytes, retries, failOffset,
         chunk, hwMaxFrameCount: hwMax,
         framesDone: rd(ST_FRAMES), bytes: rd(ST_BYTES), err: rd(ST_ERR), k,
+        ...prefixResult,
+        ...(timestamps ? {frameTimestampTicks: frameTimestampTicks!, timestampTickFs: 250000,
+                          timestampBits: 64} : {}),
     };
 }
 

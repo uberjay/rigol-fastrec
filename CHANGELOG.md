@@ -6,7 +6,25 @@ Notable changes to rigol-fastrec. Format follows
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-19
+
 ### Added
+- Opt-in `timestamps=True` on `read()` / `read_capture()`: exact per-frame uint64
+  counters, integer-preserving relative times and intervals, and schema 2 NPZ
+  storage. Mutually exclusive with averaging; default reads keep their existing
+  waveform DMA path and schema 1 archives without a timestamp pass.
+- Anchored 32-sample timestamp replay with 48-bit epoch reconstruction, full-register
+  fallback, bounded DMA retries, geometry restoration and separate timing/byte
+  telemetry. `python -m tools.validate_timestamps` exercises the public API on hardware.
+- Experimental per-frame hardware timestamp reads in the agent, plus repeatable
+  register and bulk-header/pacing probes. The register study passed 72 checks.
+- Native Frida replay tracing and a separate 32-sample bulk timestamp experiment;
+  19,090 tag comparisons passed across layouts, depths, chunk boundaries and a
+  deliberate trigger gap. Documents transfer-state restoration and the remaining
+  full-depth header association failure.
+- `python -m tools.diagnostics.frame_timestamps` measures WaveRecord timestamps with a Frida
+  observer, checks known AFG periods and an inserted gap, and archives per-frame
+  integer times alongside raw captures. Documents SCPI's asynchronous refresh.
 - `WaveRecorder.export_csv()` invokes Rigol's own Record CSV writer and retrieves
   its output via ADB, with one-shot firmware-gated source selection, bounded
   files/timeouts, strict parsing and no overwrite of existing files.
@@ -28,6 +46,11 @@ Notable changes to rigol-fastrec. Format follows
   extra queries, including actual chunk size for averaging coverage checks.
 
 ### Changed
+- Organized checkout tools into routine validators, `tools.diagnostics` and shared
+  support modules. Run them with `python -m tools...`; `tools/README.md` documents
+  the firmware revalidation workflow. Reports include configuration and source
+  hashes; the stream probe now saves measurements and fails on acquisition or
+  cleanup errors. Replay-header diagnostics default to the short-prefix study.
 - **Input impedance defaults to 1 Mohm and is always set.** Scripts relying on
   a pre-existing 50-ohm front-panel setting must request `impedance=50`.
 - Missing/invalid preambles and unknown-channel conversion raise `ScalingError`
@@ -55,16 +78,16 @@ Notable changes to rigol-fastrec. Format follows
   50 ms). Yields one frame per trigger until the caller stops iterating. Raw
   encodings (`sample_bits`, `transport`), `crop`, and multi-channel demux as in
   `read()`; no averaging.
-- `tools/stream_batch_probe.py`: measures the stream loop's batching and
+- `python -m tools.diagnostics.stream_batches`: measures the stream loop's batching and
   delivered fraction against an AFG-paced trigger across rates.
 - `examples/stream_viewer.py`: live pyqtgraph viewer over `stream()`, installed
   with the new `viewer` extra (`pip install -e '.[viewer]'`).
-- Streaming checks in `tools/validate_scope.py` (shape, live re-capture, each
+- Streaming checks in `python -m tools.validate_scope` (shape, live re-capture, each
   encoding, crop, multichannel, AFG frequency, and `read()` after a stream);
   `--no-stream` skips them.
 
 ### Changed
-- `tools/validate_scope.py` defaults now assume AFG1→CHAN1 and AFG2→CHAN3 with
+- `python -m tools.validate_scope` defaults now assume AFG1→CHAN1 and AFG2→CHAN3 with
   `--channels 1,2,3`, so a bare run exercises every check. Pass
   `--afg-channel2 0` for a single-output AFG.
 - `pyproject.toml` moved to the repository root, so the install is
@@ -91,10 +114,11 @@ cropping done on the scope. Validated on an MHO98 (firmware `00.01.00`).
   profile.
 - `ScpiControl` and `Readback` layers for direct use beneath the facade.
 - Offline test suite and an on-scope validation harness
-  (`tools/validate_scope.py`).
+  (`python -m tools.validate_scope`).
 - Self-contained wheel: the Frida agent bundle is committed and ships as package
   data, so installing needs no Node toolchain.
 
-[Unreleased]: https://github.com/uberjay/rigol-fastrec/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/uberjay/rigol-fastrec/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/uberjay/rigol-fastrec/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/uberjay/rigol-fastrec/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/uberjay/rigol-fastrec/releases/tag/v0.1.0

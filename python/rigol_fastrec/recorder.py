@@ -19,6 +19,7 @@ from pathlib import Path
 
 from .config import Channel, ChannelLayout, Trigger
 from .capture import AcquisitionMetadata, Capture, CaptureMetadata
+from .timestamps import validate_timestamp_request
 from .exceptions import MetadataError
 from .readback import Readback
 from .scpi import ScpiControl, _chan_num
@@ -186,7 +187,8 @@ class WaveRecorder:
 
     def read(self, *, count: int, channels=None, channel: int | None = None,
              crop=None, average: int = 1,
-             sample_bits: int = 16, transport: str = "raw", progress=None):
+             sample_bits: int = 16, transport: str = "raw", progress=None,
+             timestamps: bool = False):
         """Read back `count` recorded frames.
 
         `channel=N` (or `channels=[N]`) returns a bare ndarray; `channels=[a,b]`
@@ -202,7 +204,14 @@ class WaveRecorder:
         −25%, still returned as uint16, drop-in with to_volts). `transport=
         "packed"` requires `sample_bits=16`; both apply only to raw reads
         (averaged reads are always float32 averages).
+
+        ``timestamps=True`` stores per-frame counters in
+        ``readback.last_frame_timestamps`` and requires ``average=1``. The
+        waveform return shape is unchanged; defaults perform no timestamp pass.
         """
+        self._rb._last_frame_timestamps = None
+        self._rb._last_read_stats = None
+        validate_timestamp_request(timestamps, average)
         if channel is not None and channels is not None:
             raise ValueError("pass either channel= or channels=, not both")
 
@@ -223,18 +232,24 @@ class WaveRecorder:
         out = self._rb.read(
             count=count, samples_per_frame=self._mdep, channels=requested,
             crop=crop, average=average, sample_bits=sample_bits,
-            transport=transport, progress=progress)
+            transport=transport, progress=progress, timestamps=timestamps)
         return out[requested[0]] if len(requested) == 1 else out
 
     def read_capture(self, *, count: int, channels=None, crop=None,
                      average: int = 1, sample_bits: int = 16,
-                     transport: str = 'raw', progress=None) -> Capture:
+                     transport: str = 'raw', progress=None,
+                     timestamps: bool = False) -> Capture:
         """Read arrays bound to metadata from run(capture_metadata=True).
 
         Call wait_recorded() first. Defaults to ALL enabled channels, including
-        the trigger. Incomplete averaging groups are rejected.
+        the trigger. Incomplete averaging groups are rejected. ``timestamps=True``
+        attaches per-frame acquisition counters to ``Capture.timestamps`` and
+        requires ``average=1``.
         """
         from . import __version__
+        self._rb._last_frame_timestamps = None
+        self._rb._last_read_stats = None
+        validate_timestamp_request(timestamps, average)
         record = self._record_metadata
         if record is None:
             raise MetadataError("run(capture_metadata=True), then wait_recorded(), before read_capture()")
@@ -260,9 +275,11 @@ class WaveRecorder:
             self._check_settings(record, self._scpi.snapshot(), check_scaling=True)
             arrays = self.read(count=int(count), channels=requested, crop=window,
                                average=int(average), sample_bits=sample_bits,
-                               transport=transport, progress=progress)
+                               transport=transport, progress=progress, timestamps=timestamps)
             self._check_settings(record, self._scpi.snapshot(), check_scaling=True)
         except Exception:
+            self._rb._last_frame_timestamps = None
+            self._rb._last_read_stats = None
             self._invalidate_capture()
             raise
         if len(requested) == 1:
@@ -276,8 +293,9 @@ class WaveRecorder:
             requested_trigger_offset_us=self._requested['trigger_offset_us'],
             host_ready_utc=self._host_ready_utc, host_read_utc=_utc_now(),
             package_version=__version__,
-            agent_sha256=hashlib.sha256(Path(__file__).with_name('_agent.js').read_bytes()).hexdigest())
-        return Capture(arrays, metadata)
+            agent_sha256=hashlib.sha256(Path(__file__).with_name('_agent.js').read_bytes()).hexdigest(),
+            schema_version=2 if timestamps else 1)
+        return Capture(arrays, metadata, self._rb.last_frame_timestamps if timestamps else None)
 
     def export_csv(self, path, *, adb='adb', adb_serial=None, timeout=90.,
                    max_values=1_000_000):

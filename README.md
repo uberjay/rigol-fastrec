@@ -109,7 +109,9 @@ For captures you can reopen without the scope, use
 `run(capture_metadata=True)` followed by `wait_recorded()` and
 `read_capture(count=...)`. Save with `capture.save("capture.npz")` and reopen
 with `Capture.load(...)`. Arrays, actual acquisition settings and scaling travel
-together. See [docs/CAPTURES.md](docs/CAPTURES.md) for an example and timing limits.
+together. Add `timestamps=True` to collect exact per-frame acquisition counters
+and preserve them in the NPZ (`capture.timestamps`). It is off by default and
+mutually exclusive with averaging. See [docs/CAPTURES.md](docs/CAPTURES.md).
 
 Input impedance is now explicit and verified: `Channel()` defaults to **1 Mohm**;
 request `Channel(impedance=50)` for a terminated input. Existing scripts relying
@@ -151,7 +153,11 @@ pip install -e '.[dev]'
 pytest                       # offline; no scope/Frida needed
 ```
 
-`make check` also runs them, plus type-checks the agent (that half needs Node).
+`make check` also runs them, plus the agent typecheck and tests (that half needs Node).
+
+For hardware revalidation and firmware investigations, start with
+[tools/README.md](tools/README.md). It lists the routine checks, focused probes,
+wiring, saved evidence and the order to use after a firmware update.
 
 ## Layout
 
@@ -160,6 +166,7 @@ agent/    TypeScript Frida agent (frida-compile); builds the committed bundle be
 python/   rigol_fastrec -- host library + committed _agent.js bundle, and its tests
           (pyproject.toml is at the repo root)
 examples/ runnable scripts: capture_basic, throughput_bench, stream_viewer
+tools/    routine validators, diagnostics/ probes, _support/ shared helpers
 docs/     API.md -- WaveRecorder reference; VALIDATION.md -- on-scope tests;
           DESIGN.md -- architecture & design notes
 ```
@@ -227,7 +234,7 @@ adb shell "su -c 'ip rule add to 10.0.80.0/24 lookup main pref 18000'"
 
 ## LLM Use Disclosure
 
-Opus 4.8 and Fable 5 were used in the development of this software. Extensive
+Opus, Fable and Astra were used in the development of this software. Extensive
 hand-validation on actual hardware (an MHO98) has been performed. All of the code,
 regardless of who wrote it, has been reviewed for correctness to the best of
 my ability. It is, however, software and therefore may have bugs. Issues and PRs

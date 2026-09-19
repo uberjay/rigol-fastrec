@@ -1,5 +1,4 @@
 """Check that the hardware harness itself does not turn failures into passes."""
-import importlib.util
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -14,15 +13,7 @@ if not TOOLS.exists():
     pytest.skip('scope tools are checkout-only', allow_module_level=True)
 
 
-def module(name):
-    spec = importlib.util.spec_from_file_location(name, TOOLS/(name+'.py'))
-    result = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(result)
-    return result
-
-
-harness = module('validate_scope')
-captures = module('validate_captures')
+from tools._support import bench as harness, captures
 
 
 def test_report_distinguishes_failures_skips_and_numpy_bools(tmp_path):

@@ -74,7 +74,7 @@ Blocks until the record completes, then transitions the scope to replay so the
 frames are readable. Raises `ScopeRunTimeout` if the record never finishes within
 `timeout` (usually means too few triggers were fired).
 
-## `read(*, count, channel=None, channels=None, crop=None, average=1, sample_bits=16, transport="raw", progress=None)`
+## `read(*, count, channel=None, channels=None, crop=None, average=1, sample_bits=16, transport="raw", progress=None, timestamps=False)`
 
 Streams `count` recorded frames back. `channel=N` (or `channels=[N]`) returns a
 bare ndarray; `channels=[a, b]` returns `{ch: ndarray}`; by default reads the
@@ -92,6 +92,33 @@ thread, so keep it cheap; a slow callback backpressures the readback.
 | `average=k` | mean of every `k` frames on the scope → float32 | collapses `k` frames into one row (`n/k` rows). Saves bandwidth and reduces noise (effective bits beyond the ADC). Always float32, so `sample_bits`/`transport` don't apply. |
 | `sample_bits` | `16` → uint16, `8` → uint8 (top byte) | resolution vs wire width (below) |
 | `transport` | `"raw"`, or `"packed"` (16-bit only) | wire packing (below) |
+| `timestamps=True` | per-frame acquisition counters in `rec.readback.last_frame_timestamps` | extra prefix replay + counter vector; requires `average=1` |
+
+Timestamping defaults to `False`. It leaves the waveform return type unchanged.
+With `True`, readback completes the normal waveform transfer, then collects frame
+counters with a separate short-prefix replay inside the same RPC. Progress reports
+waveform rows; the call returns after timestamp collection also finishes. The
+10 µs replay pacing applies only to this optional pass, after acquisition.
+`timestamps=True, average>1` raises `ValueError` before any scope I/O. Default
+reads retain normal DMA chunks and perform no timestamp replay or transport.
+
+```python
+frames = rec.read(count=600, channels=[1, 3], timestamps=True)
+times = rec.readback.last_frame_timestamps
+elapsed = times.relative_seconds()    # one time per frame; first is zero
+intervals = times.intervals_seconds() # N-1 inter-frame intervals
+```
+
+`FrameTimestamps.ticks` is an immutable uint64 vector with `tick_fs=250000`
+(250 ps per tick), shared by all returned channels. The helper methods subtract
+integer counters before converting to seconds. A default read, rejected/failed
+read, or closing readback clears `last_frame_timestamps`. Save the returned
+object if it needs to outlive another read. `Capture.timestamps` does this for you.
+
+For nonzero frame subsets use `rec.readback.read(first=..., count=...,
+samples_per_frame=..., channels=[...], timestamps=True)`. The timestamps object's
+`first_frame` preserves that zero-based index; relative times start at the first
+returned frame. Cropping and sample encodings leave frame times unchanged.
 
 ### Wire encodings (raw reads, `average == 1`)
 
@@ -133,7 +160,7 @@ is the limit.)
 - Many repeats per trace: `average=k`, usually the biggest saver, and it improves
   SNR. Pair with `crop=` to send only the window you care about.
 
-## `read_capture(*, count, channels=None, crop=None, average=1, sample_bits=16, transport="raw", progress=None)`
+## `read_capture(*, count, channels=None, crop=None, average=1, sample_bits=16, transport="raw", progress=None, timestamps=False)`
 
 Requires `run(capture_metadata=True)` and successful `wait_recorded()`. Returns
 a `Capture` binding a channel-to-array mapping to the completed acquisition's
@@ -145,7 +172,9 @@ Use `capture.to_volts(channel)`, `capture.time_axis(channel)`,
 `capture.save(path)` and `Capture.load(path)` for offline analysis. Files retain
 raw arrays plus JSON metadata, refuse overwrite, and load without pickle.
 Inconsistent acquisition settings or scaling raise `MetadataError`.
-See [CAPTURES.md](CAPTURES.md) for the schema, input impedance, time axes and
+Set `timestamps=True` to populate `capture.timestamps` and save exact counters
+in the NPZ. Timestamping and averaging are mutually exclusive. See
+[CAPTURES.md](CAPTURES.md) for the schema, input impedance, time axes and
 hardware checks.
 
 ## `stream(*, channel=None, channels=None, crop=None, sample_bits=16, transport="raw", batch=0)`
@@ -190,7 +219,7 @@ Behaviour to know about:
   batch is delivered after 50 ms, or after 20 ms with no new frame, so
   latency is bounded at about 50 ms. `batch=1` forces one frame per capture
   and tops out near 850 frames/s. Measured with a square-wave trigger at 1000
-  samples on the default cap (`tools/stream_batch_probe.py`):
+  samples on the default cap (`python -m tools.diagnostics.stream_batches`):
 
   | trigger rate | delivered |
   |---|---|
@@ -233,6 +262,11 @@ Probe attenuation is already included in the preamble and is not applied twice.
 - `rec.readback.last_read_stats` → a copy of the last completed read's agent
   telemetry (actual chunk size/capacity, frame/byte counts and DMA timing), or
   `None` before a read or after a failed request. No additional scope query.
+  Opt-in timestamp reads add `timestampElapsedMs`, `timestampDmaMs`,
+  `timestampDmaBytes`, `timestampRetries` and `timestampFallbackFrames`.
+  The ordinary DMA fields still describe waveform transfer;
+  `elapsedTotalMs` includes the timestamp pass. The tick vector is in
+  `last_frame_timestamps`, not duplicated in the stats dictionary.
 
 ## Value types
 
