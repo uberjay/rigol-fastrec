@@ -4,6 +4,30 @@ The offline tests (`pytest`) cover only the host-side logic. The DMA,
 deinterleave, crop, and averaging all run on the scope, so they can only be
 checked against real hardware. `tools/validate_scope.py` does that.
 
+## Verified run: 2026-09-18
+
+MHO98 firmware `00.01.00`, AFG1 → CH1 and AFG2 → CH3: **67/67 automated
+checks passed**, including six same-record Rigol CSV comparisons. Each CSV
+contained eight 10,000-sample frames on three channels: **1,440,000 voltage
+values** across all six exports, with no values outside the half-WORD-code
+rounding tolerance. The worst difference was 0.138 WORD-code steps. All six raw
+recordings were unchanged after export, and both AFG outputs were confirmed off
+at exit.
+
+The host offline suite passed **107 tests**; three agent export-lifecycle tests
+and the TypeScript check also passed.
+
+```bash
+python tools/validate_scope.py --csv --output-dir /tmp/scope-validation -v
+```
+
+The default run uses 600 frames with averaging groups of 7. Actual readback
+chunks were 250 frames, confirming cross-chunk accumulation was exercised;
+the largest observed mean difference was 0.00335 codes. In the 1 Vpp metadata
+checks, CH1/CH3 sine fits were approximately 0.987/0.986 Vpp at 1 Mohm and
+0.982/0.979 Vpp at 50 ohms. Raw captures and full results are emitted by
+`--output-dir`.
+
 ## Prerequisites
 
 - Package installed: `pip install -e .` (the agent bundle is committed).
@@ -55,7 +79,7 @@ test, and the case worth hitting is again a non-contiguous enable set:
 
 ```bash
 # CH1 @ 12 MHz and CH4 @ 7 MHz, both read in one pass; {1,2,4} → 4-ch mode
-python tools/validate_scope.py --host mho98.oodles.be \
+python tools/validate_scope.py --host 10.0.10.213 \
     --channels 1,2,4 --afg-channel 1 --afg-channel2 4
 ```
 
@@ -73,21 +97,57 @@ Streaming (agent-driven continuous capture; skip with `--no-stream`):
 Each stream check pulls `--stream-frames` frames (default 8) and stops. AUTO
 sweep keeps triggers flowing, so no DUT is needed.
 
+Metadata and measurement checks run by default as well. They use separate short
+8-frame captures (10,000 samples, requested 100 MS/s), with each connected AFG
+set to a 1 Vpp sine with 0.2 V DC offset: AFG1 at 1 MHz and AFG2 at 700 kHz.
+The source load indication is explicitly matched to the scope input impedance.
+
+| Check | Proves |
+|---|---|
+| NPZ round trip and provenance | raw arrays, actual/requested settings, preambles, identity and encoding survive saving/loading |
+| Legacy versus metadata reads | same raw samples and volts, with the trigger included by default in metadata captures |
+| SCPI preamble time axis | the selected reference produces the saved origin and sample spacing |
+| Single-channel / partial-record archive | channel mapping and selected frame count remain correct |
+| Cropped raw / packed / 8-bit / averaged archives | encodings match the same full record; crop time axes retain original sample indices |
+| Absolute sine amplitude, DC and residual | voltage scaling and actual sample interval agree with the known AFG signal, independently of repeated-read consistency |
+| 1 Mohm, 50 ohm, 10x probe and nonzero vertical offset | termination is applied; probe ratio is applied once; vertical offset is handled |
+| Implicit trigger at 50 ohms | trigger-channel configuration and capture defaults agree |
+| Gapped `{1,3,4}` layout | physical lanes remain correct without moving the default AFG cables |
+| NORM sweep | actual AFG edges can complete a capture without AUTO triggering |
+| Inversion, deskew and units | settings are preserved; voltage polarity is checked; AMP channels reject voltage conversion |
+| Invalid request, stale record and changed settings | the API rejects unsupported or mismatched capture associations |
+| Stopped record / no-trigger timeout | an interrupted 8-frame capture cannot produce a labeled complete record |
+| Reconfiguration and streaming | old saved files remain independent; live record association is invalidated |
+| Rigol CSV (`--csv`) | six full records match the scope writer sample-for-sample within decimal-rounding tolerance; native completion, file integrity and unchanged raw memory are checked |
+| SCPI errors and cleanup | rejected commands fail checks; both owned AFG outputs are switched off and queried on exit |
+
+The amplitude checks allow 10% + 20 mV for Vpp, 40 mV for DC and 40 mV RMS fit
+residual, multiplied by the probe setting. The 10x test uses a direct cable and
+a 10x scope probe setting to exercise software scaling. The deskew check verifies
+that the configured value is preserved in capture metadata.
+
 ## Running it
 
 ```bash
 # full default run: AFG1 → CHAN1, AFG2 → CHAN3, nothing on CHAN2; channels 1,2,3
 # (4-channel FPGA mode, dual-source cross-talk, every combination, streaming)
-python tools/validate_scope.py --host mho98.oodles.be
+python tools/validate_scope.py --host 10.0.10.213
+
+# retain JSON results and sample/metadata archives in a NEW directory
+python tools/validate_scope.py --host 10.0.10.213 --output-dir /tmp/scope-validation
+
+# only the metadata/measurement checks, or only the previous groups
+python tools/validate_scope.py --metadata-only --output-dir /tmp/scope-metadata
+python tools/validate_scope.py --no-metadata
 
 # self-consistency + streaming only, no cabling
-python tools/validate_scope.py --host mho98.oodles.be --no-afg
+python tools/validate_scope.py --host 10.0.10.213 --no-afg
 
 # single-output AFG cabled to CHAN1
-python tools/validate_scope.py --host mho98.oodles.be --afg-channel2 0
+python tools/validate_scope.py --host 10.0.10.213 --afg-channel2 0
 
 # skip the streaming checks
-python tools/validate_scope.py --host mho98.oodles.be --no-stream
+python tools/validate_scope.py --host 10.0.10.213 --no-stream
 ```
 
 The lane-mapping cases that matter most are 3 to 4 enabled channels (4-channel
@@ -97,13 +157,21 @@ channel at its physical lane and leaves a gap for the disabled one
 
 ```bash
 # {1,2,4}: CH3 disabled → gap at lane 2, so CH4 sits at physical lane 3 (not a packed lane 2)
-python tools/validate_scope.py --host mho98.oodles.be \
+python tools/validate_scope.py --host 10.0.10.213 \
     --channels 1,2,4 --afg-channel 1 --afg-channel2 4
 ```
 
 Re-cable the AFG to each channel in turn (and vary `--channels`; every AFG
 channel must be in the enabled set) to cover the combinations you care about.
 Exit code is non-zero if any check fails.
+
+The JSON report distinguishes PASS, FAIL and SKIP, records the scope identity and
+arguments, and is updated after each check. NPZ files contain the tested raw
+captures. Without `--output-dir`, archive round trips use a temporary directory.
+An existing output directory is refused. Unexpected exceptions and Ctrl-C are
+reported as failures; AFG cleanup still runs. The scope returns to free-run with
+the last test settings; the script does not restore the entire prior front-panel
+configuration. No cables need to move during a default run.
 
 ### Stream batching against trigger rate
 
@@ -116,8 +184,8 @@ the trigger rate shows loss; identical consecutive frames would mean a stale
 replay. Run it after touching `waitCaptured` or the arm-size adaptation:
 
 ```bash
-python tools/stream_batch_probe.py --host mho98.oodles.be
-python tools/stream_batch_probe.py --host mho98.oodles.be \
+python tools/stream_batch_probe.py --host 10.0.10.213
+python tools/stream_batch_probe.py --host 10.0.10.213 \
     --rates 50,200,1000,10000 --batches 1,16,0
 ```
 
@@ -169,17 +237,35 @@ example, at 1000 samples (cap ~250):
 --frames 600 --average 7    # chunks ~250/250/100; 7-frame groups straddle them
 ```
 
-## One-time authoritative cross-check (manual)
+These are now the defaults. The harness also reads `rec.readback.last_read_stats`
+and records the actual chunk size/capacity in the JSON report. It explicitly
+reports whether the requested frame count and averaging factor exercised a
+group across a chunk boundary, instead of assuming they did. A smaller custom
+run can pass its averaging comparison while that coverage is reported as SKIP.
 
-WaveRecord frame data can't be read back over SCPI (`:WAV:DATA?` doesn't apply to
-it). The only path is the scope UI's Save → CSV. To check the fast readback
-against Rigol's own data once:
+## Same-record Rigol CSV cross-check (automated)
 
-1. Record a batch and save one frame to `.npy`:
-   ```bash
-   python examples/capture_basic.py --host mho98.oodles.be --frames 1 \
-       --samples 1000 --out /tmp/frame.npy
-   ```
-2. On the scope UI, export the same recorded frame to CSV and copy it off.
-3. Compare the columns. The fast-readback codes (or `to_volts`) should match the
-   CSV sample-for-sample.
+Use `--csv` to export all frames in six short metadata cases through Rigol's own
+Record CSV writer, pull them using ADB, and compare all values with fastrec.
+The check includes a raw re-read after each export to prove the acquisition
+memory is unchanged. See [CSV_EXPORT.md](CSV_EXPORT.md) for the corrected save
+command, temporary firmware source selection, file handling and comparison limits.
+
+```bash
+python tools/validate_scope.py --host 10.0.10.213 --csv \
+    --output-dir /tmp/scope-csv-validation
+```
+
+## Firmware behavior
+
+On MHO98 firmware `00.01.00`, `:ACQ:SRAT?` before a new record can describe the
+previous acquisition. The metadata path accepts a rate refresh at completion,
+while checking the configured timebase, depth and channels. The completed
+record's rate must then remain fixed throughout readback. Actual and requested
+rates can also differ: the 10,000-sample test requested 100 MS/s and acquired at
+50 MS/s. The fit uses the acquired rate and saved files retain both values.
+
+The same firmware rejected redundant `:CHANn:TCAL 0` writes at 20 us/div with
+`-222,"Data out of range"`, despite reporting zero deskew. The harness queries
+deskew first, resets it only if nonzero, and verifies zero afterward. Rejected
+configuration commands fail the check.

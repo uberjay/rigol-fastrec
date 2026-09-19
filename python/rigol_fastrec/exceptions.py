@@ -24,6 +24,14 @@ class ScopeRunTimeout(RigolFastrecError):
     """WaveRecord did not come up (FMAX never reached 1) within the deadline."""
 
 
+class MetadataError(RigolFastrecError):
+    """Acquisition metadata is missing, invalid, or no longer matches the record."""
+
+
+class ScalingError(MetadataError):
+    """Valid WORD-format scaling is unavailable; codes cannot be called volts."""
+
+
 class ReadbackShortRead(RigolFastrecError):
     """A readback chunk returned fewer frames than requested and could not be
     recovered by re-issuing the SetRun."""

@@ -54,6 +54,9 @@ const MHO98_SYMBOLS = {
     setProcChEn:      "DevSystemSCU_SetProcChEn",
     setProcLaEn:      "DevSystemSCU_SetProcLaEn",
     setIntxOut:       "DevLaDisplayWpu_SetIntxOut",
+    // Rigol-owned WaveRecord CSV export (resolved lazily)
+    storageSetWaveDepth: "_ZN11CApiStorage23ApiStorage_SetWaveDepthEi",
+    saveRecordAsCsv: "_ZN9CWaveFile15saveRecordAsCSVER7RString",
     // channel layout
     getChanCount:     "_Z16API_GetChanCountv",
     scopeChanGetCH:   "_ZN10CScopeChan5getCHE4Chan",

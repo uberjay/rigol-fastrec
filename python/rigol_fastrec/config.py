@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 
 @dataclass(frozen=True)
@@ -22,6 +22,10 @@ class Trigger:
     channel_offset: float = 0.0
     channel_coupling: str = "DC"    # "DC" | "AC"
     channel_probe: float = 1.0      # attenuation ratio (10.0 for a 10x probe)
+    channel_impedance: float = 1e6  # ohms; explicit also for implicit trigger channel
+
+    def __post_init__(self) -> None:
+        _check_impedance(self.channel_impedance)
 
 
 @dataclass(frozen=True)
@@ -32,6 +36,15 @@ class Channel:
     probe: float = 1.0              # attenuation ratio
     offset: float = 0.0             # volts
     bandwidth_limit: str = "OFF"    # "OFF" | "20M" | "250M" (model-dependent)
+    impedance: float = 1e6         # ohms: 1e6 or 50
+
+    def __post_init__(self) -> None:
+        _check_impedance(self.impedance)
+
+
+def _check_impedance(value: float) -> None:
+    if value not in (50, 1e6):
+        raise ValueError("input impedance must be 50 or 1e6 ohms")
 
 
 @dataclass(frozen=True)

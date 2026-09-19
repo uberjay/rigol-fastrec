@@ -60,6 +60,16 @@ class Readback:
         self._script = None
         self._sock = None        # data socket; opened once, reused across reads
         self.resolved: dict | None = None
+        self._last_read_stats: dict | None = None
+
+    @property
+    def last_read_stats(self) -> dict | None:
+        """Agent telemetry for the last completed read, or None after a failure.
+
+        Includes actual chunk size, hardware chunk capacity, frame/byte counts
+        and DMA time. Returns a copy; no instrument query is performed.
+        """
+        return None if self._last_read_stats is None else dict(self._last_read_stats)
 
     def open(self, *, model: str | None = None,
              fw_version: str | None = None) -> "Readback":
@@ -128,6 +138,16 @@ class Readback:
             log.warning("agent JS error: %s",
                         message.get("stack") or message.get("description"))
 
+    def arm_record_csv(self, timeout: float) -> dict:
+        """Internal CSV source selection; scope must be exclusively owned."""
+        return dict(self._script.exports_sync.arm_record_csv(timeout*1000))
+
+    def record_csv_status(self) -> dict:
+        return dict(self._script.exports_sync.record_csv_status())
+
+    def disarm_record_csv(self) -> dict:
+        return dict(self._script.exports_sync.disarm_record_csv())
+
     def channel_layout(self) -> dict:
         """Live channel layout: {stride, enabledList, apiChanCount, enabledMask}."""
         lay = dict(self._script.exports_sync.channel_layout())
@@ -163,6 +183,7 @@ class Readback:
         """
         import numpy as np
 
+        self._last_read_stats = None
         # Validate encoding args up front (before touching the scope).
         if sample_bits not in (16, 8):
             raise ValueError(f"sample_bits must be 16 or 8, got {sample_bits}")
@@ -308,6 +329,7 @@ class Readback:
             log.debug("DMA (engine read, pre-wire): %.1f MB in %.1f ms = %.1f MB/s "
                       "(%.0f frame/s)", dma_bytes / 1e6, dma_ms,
                       dma_bytes / dma_ms / 1e3, count / dma_ms * 1e3)
+        self._last_read_stats = dict(status)
         return out
 
     def stream(self, *, samples_per_frame: int,

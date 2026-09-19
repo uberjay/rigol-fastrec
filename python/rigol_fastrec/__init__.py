@@ -9,8 +9,11 @@ from __future__ import annotations
 import logging
 
 from .config import Channel, ChannelLayout, Trigger
+from .capture import AcquisitionMetadata, Capture, CaptureMetadata, ChannelMetadata, WaveformPreamble
 from .exceptions import (
     AgentError,
+    MetadataError,
+    ScalingError,
     ReadbackShortRead,
     RigolFastrecError,
     ScopeNotFound,
@@ -37,6 +40,13 @@ __all__ = [
     "Trigger",
     "Channel",
     "ChannelLayout",
+    "WaveformPreamble",
+    "ChannelMetadata",
+    "AcquisitionMetadata",
+    "CaptureMetadata",
+    "Capture",
+    "MetadataError",
+    "ScalingError",
     "enable_logging",
     "enable_scpi_logging",
     "RigolFastrecError",

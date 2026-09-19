@@ -50,8 +50,11 @@ setup. Returns `None`.
 `configure()` also probes and caches `FMAX` (the max recordable frames at this
 depth). To capture more than one record holds, split across multiple
 `run()/read()` cycles (re-firing triggers each time) or use a shallower depth.
+The actual memory depth is queried after configuration; requested sample rate
+and depth need not be the settings the scope ultimately uses. The metadata
+capture API below preserves both requested and actual values.
 
-## `run(n_frames, *, ready_timeout=None)`
+## `run(n_frames, *, ready_timeout=None, capture_metadata=False)`
 
 Arms WaveRecord for `n_frames` and blocks until the engine is actually recording
 (`:WREPlay:FCURrent` reaches 1, before any trigger), so triggers fired after
@@ -60,6 +63,10 @@ Arms WaveRecord for `n_frames` and blocks until the engine is actually recording
 Raises `ValueError` immediately if `n_frames` exceeds the cached `FMAX`, and
 `ScopeRunTimeout` if the engine never comes up within `ready_timeout` (default
 scales with `n_frames`).
+
+Set `capture_metadata=True` to query acquisition settings before arming and
+check them again after `wait_recorded()`. This enables `read_capture()`; it adds
+SCPI queries outside active recording. The default array-only path is unchanged.
 
 ## `wait_recorded(timeout=10.0)`
 
@@ -125,6 +132,21 @@ is the limit.)
 - 2× and 8 bits is enough: `sample_bits=8`.
 - Many repeats per trace: `average=k`, usually the biggest saver, and it improves
   SNR. Pair with `crop=` to send only the window you care about.
+
+## `read_capture(*, count, channels=None, crop=None, average=1, sample_bits=16, transport="raw", progress=None)`
+
+Requires `run(capture_metadata=True)` and successful `wait_recorded()`. Returns
+a `Capture` binding a channel-to-array mapping to the completed acquisition's
+metadata. The default includes **all enabled channels, including the trigger**;
+even a single channel stays in the mapping. `count` must fit the record and
+divide evenly by `average`. Other encoding/crop options match `read()`.
+
+Use `capture.to_volts(channel)`, `capture.time_axis(channel)`,
+`capture.save(path)` and `Capture.load(path)` for offline analysis. Files retain
+raw arrays plus JSON metadata, refuse overwrite, and load without pickle.
+Inconsistent acquisition settings or scaling raise `MetadataError`.
+See [CAPTURES.md](CAPTURES.md) for the schema, input impedance, time axes and
+hardware checks.
 
 ## `stream(*, channel=None, channels=None, crop=None, sample_bits=16, transport="raw", batch=0)`
 
@@ -197,27 +219,42 @@ preamble cached at `configure()`. Vectorized over any array shape. Correct for
 `16/raw`, `16/packed`, and averages directly; `uint8` (from `sample_bits=8`)
 is lifted back to the 16-bit domain (×256) first.
 
+Missing or invalid preambles and unconfigured channels raise `ScalingError`;
+there is no identity-scaling fallback. This method uses the live cached scaling.
+For arrays that must survive reconfiguration, use `Capture.to_volts()` instead.
+Probe attenuation is already included in the preamble and is not applied twice.
+
 ## Introspection
 
 - `max_frames(*, refresh=False)` → the max recordable frames at the current
   depth (`FMAX`). Cached at `configure()`; `refresh=True` re-probes the scope.
 - `channel_layout()` → a `ChannelLayout` with the live `stride`, enabled
   channels, per-channel lane `offsets`, and `samples_per_frame` (= MDEP).
+- `rec.readback.last_read_stats` → a copy of the last completed read's agent
+  telemetry (actual chunk size/capacity, frame/byte counts and DMA timing), or
+  `None` before a read or after a failed request. No additional scope query.
 
 ## Value types
 
 ```python
 Trigger(source="CHAN2", level=1.5, slope="POS",          # edge trigger
         channel_range=8.0, channel_offset=0.0,           # the source channel's
-        channel_coupling="DC", channel_probe=1.0)        #   vertical config
+        channel_coupling="DC", channel_probe=1.0,
+        channel_impedance=1e6)                          # ohms
 
 Channel(range=0.5, coupling="DC", probe=1.0,             # per-channel vertical
-        offset=0.0, bandwidth_limit="OFF")               # range = full-scale V
+        offset=0.0, bandwidth_limit="OFF",               # range = full-scale V
+        impedance=1e6)                                 # ohms: 1e6 or 50
 ```
 
 `level`/`offset` are in probe-tip volts; `range` is full-scale (8 vertical
 divisions). `slope` is `"POS"`/`"NEG"`; `bandwidth_limit` is `"OFF"`/`"20M"`/
 `"250M"` (model-dependent).
+
+Input impedance is always set and verified by `configure()`; the default is
+1 Mohm. Scripts that previously relied on a front-panel 50-ohm setting must now
+request `impedance=50`. An explicit `Channel` overrides the trigger channel's
+implicit settings.
 
 ## Errors
 
@@ -225,9 +262,23 @@ All subclass `RigolFastrecError`:
 
 - `ScopeNotFound`: scope / frida-server unreachable, or process not found.
 - `UnsupportedFirmware`: model/firmware not on the whitelist (host or agent).
+- `MetadataError`: missing/inconsistent acquisition metadata or invalid archive.
+- `ScalingError` (also a `MetadataError`): missing/invalid waveform scaling or
+  conversion of a saved channel whose units are not volts.
 - `ScopeRunTimeout`: WaveRecord didn't arm (`run`) or didn't finish
   (`wait_recorded`) in time.
 - `ReadbackShortRead`: the readback stream desynced / came up short (`read()` or
   `stream()`).
 - `AgentError`: the Frida agent reported an error (carries any structured detail
   in `.detail`).
+
+## Rigol-owned Record CSV export
+
+`rec.export_csv(path, *, adb="adb", adb_serial=None, timeout=90.,
+max_values=1_000_000)` exports the complete metadata-bound record through the
+scope's CSV writer and retrieves it using ADB. Returns `CsvExport` with path,
+remote filename, SHA-256, native writer status and parsed `RecordCsv` waveforms.
+Use `rigol_fastrec.csv_export.compare_record_csv(capture, export.waveform)` for a
+strict same-record comparison.
+See [CSV_EXPORT.md](CSV_EXPORT.md) for setup, the Frida hooks, file handling and
+comparison thresholds.

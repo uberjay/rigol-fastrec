@@ -13,11 +13,12 @@ and the record→replay transition.
 from __future__ import annotations
 
 import logging
-import sys
+import math
 import time
 
 from .config import Channel, Trigger
-from .exceptions import ScopeRunTimeout
+from .capture import AcquisitionMetadata, ChannelMetadata, WaveformPreamble
+from .exceptions import MetadataError, ScalingError, ScopeRunTimeout
 from .firmware import check_idn
 
 # Every SCPI write/query is logged here at DEBUG — this is the "firehose" tier.
@@ -59,12 +60,12 @@ class ScpiControl:
         self._inst = None
         self.model: str | None = None
         self.firmware: str | None = None
-        # Set by configure(): the snapped MDEP (engine samples, all channels
-        # interleaved) and the ascending list of enabled channel numbers.
+        self.idn: str | None = None
+        # Set by configure(): actual MDEP per channel and enabled channel numbers.
         self.engine_samples: int = 0
         self.enabled_channels: tuple[int, ...] = ()
-        # Per-channel WORD-format scaling, for to_volts(): {ch: (inc, orig, ref)}.
-        self._preamble: dict[int, tuple[float, float, float]] = {}
+        self._preamble: dict[int, WaveformPreamble] = {}
+        self._configured_channels: dict[int, Channel] = {}
 
     def open(self) -> "ScpiControl":
         import pyvisa
@@ -76,7 +77,8 @@ class ScpiControl:
         self._inst.write_termination = "\n"
         self.write("*CLS")
         # Check the firmware before doing anything else; raises UnsupportedFirmware.
-        self.model, self.firmware = check_idn(self.query("*IDN?"))
+        self.idn = self.query("*IDN?")
+        self.model, self.firmware = check_idn(self.idn)
         return self
 
     def close(self) -> None:
@@ -87,6 +89,8 @@ class ScpiControl:
             except Exception:
                 pass
         self._inst = self._rm = None
+        self._preamble.clear()
+        self._configured_channels.clear()
 
     def write(self, cmd: str) -> None:
         """Issue a raw SCPI command (also the escape hatch for advanced/demo
@@ -119,14 +123,19 @@ class ScpiControl:
         first makes the later SCAL recompute MDEP off the new timebase.
         """
         assert self._inst is not None, "not open()ed"
-        if float(sample_rate) > _RIGOL_MAX_SAMPLE_RATE:
+        self._preamble.clear()
+        self._configured_channels.clear()
+        self.engine_samples = 0
+        self.enabled_channels = ()
+        if not math.isfinite(sample_rate) or not 0 < sample_rate <= _RIGOL_MAX_SAMPLE_RATE:
             raise ValueError(
-                f"sample_rate {sample_rate:g} exceeds the MHO98 max real-time "
-                f"rate ({_RIGOL_MAX_SAMPLE_RATE:g} Sa/s)")
+                f"sample_rate must be positive and <= {_RIGOL_MAX_SAMPLE_RATE:g} Sa/s")
+        if not math.isfinite(trigger_offset_us):
+            raise ValueError("trigger_offset_us must be finite")
+        if samples < 1 or int(samples) != samples:
+            raise ValueError("samples must be a positive integer")
         mdep = snap_mdep(int(samples))
         w = self.write
-
-        w(":STOP")
 
         chans = dict(channels or {})
         # Enable the trigger source channel implicitly so it counts toward the
@@ -137,12 +146,22 @@ class ScpiControl:
             chans[trig_num] = Channel(range=trigger.channel_range,
                                       coupling=trigger.channel_coupling,
                                       probe=trigger.channel_probe,
-                                      offset=trigger.channel_offset)
+                                      offset=trigger.channel_offset,
+                                      impedance=trigger.channel_impedance)
+        if not chans or any(n not in _ANALOG_CHANNELS for n in chans):
+            raise ValueError("configure at least one analog channel in 1..4")
+
+        w(":STOP")
 
         for num in sorted(chans):
             ch = chans[num]
             tag = f"CHAN{num}"
             w(f":{tag}:DISP ON")
+            # Impedance changes the allowed vertical settings; apply it first.
+            w(f":{tag}:IMP {'FIFT' if ch.impedance == 50 else 'OMEG'}")
+            actual = _impedance(self.query(f":{tag}:IMP?"))
+            if actual != ch.impedance:
+                raise MetadataError(f"{tag} impedance readback {actual:g} != requested {ch.impedance:g} ohms")
             w(f":{tag}:COUP {ch.coupling}")
             w(f":{tag}:PROB {ch.probe}")           # set PROB first → volts at tip
             w(f":{tag}:SCAL {ch.range / 8.0:g}")   # 8 vertical divisions
@@ -174,10 +193,12 @@ class ScpiControl:
         w(f":TRIG:EDGE:SLOP {trigger.slope}")
         w(f":TRIG:EDGE:LEV {trigger.level:g}")
 
-        self.engine_samples = mdep
+        actual_mdep = self._positive_int(":ACQ:MDEP?")
+        self.engine_samples = actual_mdep
         self.enabled_channels = tuple(sorted(chans))
         self._cache_preamble(self.enabled_channels)
-        return mdep
+        self._configured_channels = chans
+        return actual_mdep
 
     def begin_wave_record(self, frame_interval: float = 1e-8) -> None:
         """Put the scope into WaveRecord mode (call once after configure()).
@@ -280,7 +301,7 @@ class ScpiControl:
             if time.monotonic() > deadline:
                 fmax = q(":RECord:WREPlay:FMAX?")
                 raise ScopeRunTimeout(
-                    f"WaveRecord did not finish within {timeout:.0f}s "
+                    f"WaveRecord did not finish within {timeout:g}s "
                     f"(WREPlay FMAX={fmax}). Were enough triggers fired?")
             time.sleep(0.01)
         w(":STOP")
@@ -303,38 +324,108 @@ class ScpiControl:
     # --- volts conversion --------------------------------------------------
 
     def _cache_preamble(self, channels: tuple[int, ...]) -> None:
-        """Cache each enabled channel's WORD-format y-scaling for to_volts().
+        """Atomically cache full WORD/RAW preambles; never substitute identity.
         :WAV:PRE? → fmt,typ,pts,count,xinc,xorig,xref,yinc,yorig,yref."""
         assert self._inst is not None
         w, q = self.write, self.query
+        self._preamble = {}
         w(":WAV:MODE RAW")
         w(":WAV:FORM WORD")
-        self._preamble = {}
+        pending = {}
         for ch in channels:
-            w(f":WAV:SOUR CHAN{ch}")
             try:
-                pre = q(":WAV:PRE?").split(",")
-                self._preamble[ch] = (float(pre[7]), float(pre[8]), float(pre[9]))
+                w(f":WAV:SOUR CHAN{ch}")
+                pending[ch] = WaveformPreamble.parse(q(":WAV:PRE?"))
             except Exception as e:
-                # Don't swallow silently — a timeout/garbage here almost always
-                # means the scope is wedged (reboot it), and a silent identity
-                # fallback would just give wrong volts and hide that.
-                print(f"  warning: :WAV:PRE? for CHAN{ch} failed "
-                      f"({type(e).__name__}: {e}); using identity scaling. A "
-                      f"timeout here usually means the scope is wedged — reboot.",
-                      file=sys.stderr)
-                self._preamble[ch] = (1.0, 0.0, 0.0)         # identity fallback
+                raise ScalingError(f"CHAN{ch}: cannot obtain valid WORD/RAW scaling") from e
+        self._preamble = pending
 
     def to_volts(self, codes, channel: int):
         """Convert codes to float32 volts for `channel`, using the cached WORD
         preamble. Vectorized over any array shape. Accepts uint16 codes (16-bit
         domain) or float32 averages directly; `uint8` codes (the top byte from
         `sample_bits=8`) are shifted back to the 16-bit domain (×256) first."""
-        import numpy as np
-        inc, orig, ref = self._preamble.get(channel, (1.0, 0.0, 0.0))
-        c = np.asarray(codes)
-        scale = 256.0 if c.dtype == np.uint8 else 1.0   # 8-bit top byte → 16-bit
-        return (c.astype(np.float32) * scale - ref - orig) * inc
+        try:
+            pre = self._preamble[channel]
+        except KeyError as exc:
+            raise ScalingError(f"no valid scaling for CHAN{channel}; configure first") from exc
+        return pre.to_volts(codes)
+
+    def _number(self, command: str, *, positive: bool = False) -> float:
+        try:
+            value = float(self.query(command))
+            if not math.isfinite(value) or (positive and value <= 0):
+                raise ValueError("invalid numeric response")
+            return value
+        except Exception as exc:
+            raise MetadataError(f"invalid response to {command}") from exc
+
+    def _positive_int(self, command: str) -> int:
+        value = self._number(command, positive=True)
+        if value != int(value):
+            raise MetadataError(f"non-integer response to {command}")
+        return int(value)
+
+    def recorded_frames(self) -> int:
+        """Query completed playback depth, not recording capacity or live position."""
+        value = self._number(":RECord:WREPlay:FMAX?")
+        if value < 0 or value != int(value):
+            raise MetadataError("invalid completed frame count")
+        return int(value)
+
+    def snapshot(self) -> AcquisitionMetadata:
+        """Query actual settings and preambles outside active recording.
+
+        A failed snapshot invalidates cached scaling.
+        """
+        try:
+            return self._snapshot()
+        except Exception as exc:
+            self._preamble.clear()
+            if isinstance(exc, MetadataError):
+                raise
+            raise MetadataError("could not read acquisition metadata") from exc
+
+    def _snapshot(self) -> AcquisitionMetadata:
+        if not self._configured_channels or not self.idn:
+            raise MetadataError("configure an open scope before taking a snapshot")
+        q = self.query
+        enabled = tuple(ch for ch in _ANALOG_CHANNELS if _bool(q(f":CHAN{ch}:DISP?")))
+        if enabled != self.enabled_channels:
+            raise MetadataError("enabled channels changed since configure()")
+        depth = self._positive_int(":ACQ:MDEP?")
+        if depth != self.engine_samples:
+            raise MetadataError("memory depth changed since configure()")
+        rate = self._number(":ACQ:SRAT?", positive=True)
+        acq_type = q(":ACQ:TYPE?").upper()
+        if acq_type != 'NORM':
+            raise MetadataError("metadata captures currently require NORM acquisition")
+        channels = []
+        self._cache_preamble(enabled)
+        for ch in enabled:
+            tag = f":CHAN{ch}"
+            settings = Channel(
+                range=8*self._number(tag+":SCAL?", positive=True),
+                offset=self._number(tag+":OFFS?"),
+                probe=self._number(tag+":PROB?", positive=True),
+                coupling=q(tag+":COUP?").upper(),
+                bandwidth_limit=q(tag+":BWL?").upper(),
+                impedance=_impedance(q(tag+":IMP?")))
+            if settings.impedance != self._configured_channels[ch].impedance:
+                raise MetadataError(f"CHAN{ch} impedance changed since configure()")
+            channels.append(ChannelMetadata(
+                channel=ch, settings=settings, inverted=_bool(q(tag+":INV?")),
+                deskew_s=self._number(tag+":TCAL?"), units=q(tag+":UNIT?").upper(),
+                preamble=self._preamble[ch]))
+        return AcquisitionMetadata(
+            idn=self.idn, model=self.model, firmware=self.firmware,
+            sample_rate=rate, memory_depth=depth, acquisition_type=acq_type,
+            timebase_scale_s=self._number(":TIM:MAIN:SCAL?", positive=True),
+            timebase_offset_s=self._number(":TIM:MAIN:OFFS?"),
+            trigger_source=q(":TRIG:EDGE:SOUR?").upper(),
+            trigger_slope=q(":TRIG:EDGE:SLOP?").upper(),
+            trigger_level=self._number(":TRIG:EDGE:LEV?"),
+            trigger_sweep=q(":TRIG:SWE?").upper(), channels=tuple(channels))
 
     def __enter__(self) -> "ScpiControl":
         return self.open()
@@ -350,3 +441,21 @@ def _chan_num(source: str) -> int | None:
     if s.startswith("CHAN") and s[4:].isdigit():
         return int(s[4:])
     return None
+
+
+def _impedance(response: str) -> float:
+    value = response.strip().upper()
+    if value == 'OMEG':
+        return 1e6
+    if value in ('FIFT', 'FIFTY'):
+        return 50.
+    raise MetadataError(f"unknown input impedance response: {response!r}")
+
+
+def _bool(response: str) -> bool:
+    value = response.strip().upper()
+    if value in ('1', 'ON'):
+        return True
+    if value in ('0', 'OFF'):
+        return False
+    raise MetadataError(f"unknown boolean response: {response!r}")

@@ -22,6 +22,11 @@ Validated on an MHO98 (firmware `00.01.00`):
 
 Probably adaptable to other Rigol scopes running Android.
 
+The opt-in [metadata capture path](docs/CAPTURES.md) is covered by offline tests
+and the [automated scope harness](docs/VALIDATION.md), including optional
+[automatic Rigol Record CSV export/comparison](docs/CSV_EXPORT.md) via Frida and
+ADB.
+
 ## Install
 
 ```bash
@@ -100,6 +105,16 @@ speed/precision trade-offs.
 
 ## Running the examples
 
+For captures you can reopen without the scope, use
+`run(capture_metadata=True)` followed by `wait_recorded()` and
+`read_capture(count=...)`. Save with `capture.save("capture.npz")` and reopen
+with `Capture.load(...)`. Arrays, actual acquisition settings and scaling travel
+together. See [docs/CAPTURES.md](docs/CAPTURES.md) for an example and timing limits.
+
+Input impedance is now explicit and verified: `Channel()` defaults to **1 Mohm**;
+request `Channel(impedance=50)` for a terminated input. Existing scripts relying
+on a front-panel 50-ohm setting need that change.
+
 The examples live in `examples/` and import the installed package, so run them
 straight from the checkout.
 
@@ -114,6 +129,9 @@ python examples/capture_basic.py --host 10.0.80.80 --frames 64 --samples 1000
 # readback throughput across block sizes, raw vs averaged
 python examples/throughput_bench.py --host 10.0.80.80 \
     --batches 64,256,1024 --average 1,8
+
+# wait for four external triggers, then save raw channels plus metadata
+python examples/capture_with_metadata.py --host 10.0.80.80 --out capture.npz
 ```
 
 `stream_viewer` is a live plot over `stream()` (latest frame plus a rolling

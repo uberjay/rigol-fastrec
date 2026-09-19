@@ -9,7 +9,10 @@ import {
     streamFrames, streamStop,
 } from "./rpc.js";
 
+import { armRecordCsv, recordCsvStatus, disarmRecordCsv } from "./native/csv.js";
+
 rpc.exports = {
+    armRecordCsv, recordCsvStatus, disarmRecordCsv,
     init,
     dispose,
     resolve,

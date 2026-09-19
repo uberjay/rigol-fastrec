@@ -4,6 +4,7 @@ import numpy as np
 import pytest
 
 from rigol_fastrec.scpi import _RIGOL_VALID_MDEP, ScpiControl, snap_mdep
+from rigol_fastrec import WaveformPreamble, ScalingError
 
 
 def test_snap_mdep_rounds_up_to_valid_depth():
@@ -21,7 +22,7 @@ def test_snap_mdep_too_deep_raises():
 
 def _scpi(inc, orig, ref):
     s = ScpiControl("unused")              # not opened; to_volts only needs the preamble
-    s._preamble = {1: (inc, orig, ref)}
+    s._preamble = {1: WaveformPreamble(1, 2, 1000, 1, 1e-9, -2e-7, 0, inc, orig, ref)}
     return s
 
 
@@ -46,7 +47,11 @@ def test_to_volts_float32_means_passthrough():
     np.testing.assert_allclose(v, [0.0, (40000 - 32768) * 1e-4], atol=1e-5)
 
 
-def test_to_volts_unknown_channel_is_identity():
-    # no preamble for ch 9 → (1.0, 0.0, 0.0): volts == codes
-    v = _scpi(1e-4, 0.0, 32768.0).to_volts(np.array([5, 7], dtype=np.uint16), 9)
-    np.testing.assert_allclose(v, [5.0, 7.0])
+def test_to_volts_unknown_channel_rejected():
+    with pytest.raises(ScalingError):
+        _scpi(1e-4, 0.0, 32768.0).to_volts(np.array([5, 7], dtype=np.uint16), 9)
+
+
+def test_nonzero_y_origin_is_in_codes():
+    np.testing.assert_allclose(_scpi(.001, 20., 32768.).to_volts(
+        np.array([32788, 33788], dtype=np.uint16), 1), [0., 1.], atol=1e-6)

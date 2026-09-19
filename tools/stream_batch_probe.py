@@ -23,8 +23,8 @@ Reading the numbers:
 * frames << rate * elapsed: re-arms are discarding partial captures.
 * 0 frames (TimeoutError): the loop never sees ready at this rate.
 
-    python tools/stream_batch_probe.py --host mho98.oodles.be
-    python tools/stream_batch_probe.py --host mho98.oodles.be --rates 2,10 --batches 1,4
+    python tools/stream_batch_probe.py --host 10.0.10.213
+    python tools/stream_batch_probe.py --host 10.0.10.213 --rates 2,10 --batches 1,4
 """
 
 from __future__ import annotations
@@ -107,7 +107,7 @@ def run_case(rec: WaveRecorder, *, channel: int, batch: int, seconds: float,
 
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    p.add_argument("--host", default="mho98.oodles.be")
+    p.add_argument("--host", default="10.0.10.213")
     p.add_argument("--afg-prefix", default=":SOURce1")
     p.add_argument("--afg-channel", type=int, default=1,
                    help="input channel the AFG output is cabled to (default 1)")

@@ -6,6 +6,44 @@ Notable changes to rigol-fastrec. Format follows
 
 ## [Unreleased]
 
+### Added
+- `WaveRecorder.export_csv()` invokes Rigol's own Record CSV writer and retrieves
+  its output via ADB, with one-shot firmware-gated source selection, bounded
+  files/timeouts, strict parsing and no overwrite of existing files.
+- `--csv` scope validation compares six complete records against Rigol CSV,
+  checks every sample and verifies raw memory is unchanged afterward; saves CSV,
+  NPZ, hashes and per-channel errors.
+- Opt-in `run(capture_metadata=True)` / `read_capture()`: raw samples bound to
+  actual acquisition settings, full preambles, encoding and provenance.
+- Portable `Capture.save()` / `Capture.load()` NPZ archives with JSON metadata,
+  offline voltage conversion and crop-aware time axes based on the sample rate
+  or saved SCPI preamble.
+- Explicit `Channel.impedance` and `Trigger.channel_impedance` (50 or 1e6 ohms),
+  set and verified before vertical configuration.
+- Capture example and offline tests; automated scope validation of archives,
+  scaling, both impedances, probe ratio, units, gapped lanes and failure paths.
+- JSON validation reports and saved NPZ evidence via `--output-dir`, with AFG
+  cleanup on failures/interrupts.
+- `Readback.last_read_stats` exposes successful agent readback telemetry without
+  extra queries, including actual chunk size for averaging coverage checks.
+
+### Changed
+- **Input impedance defaults to 1 Mohm and is always set.** Scripts relying on
+  a pre-existing 50-ohm front-panel setting must request `impedance=50`.
+- Missing/invalid preambles and unknown-channel conversion raise `ScalingError`
+  instead of substituting identity scaling.
+- Configuration reads back actual memory depth instead of assuming the scope
+  accepted the requested depth.
+- Scope validation defaults to 600 frames averaged in groups of 7, and reports
+  whether a group actually crossed a readback chunk boundary.
+
+### Fixed
+- Metadata accepts a sample-rate refresh at acquisition completion: the pre-arm
+  SCPI query can still describe the previous record on MHO98 `00.01.00`. Rate
+  changes during readback remain errors; actual versus requested rates are saved.
+- Python `channel_layout().offsets` now matches the agent's physical lanes for
+  noncontiguous channels in four-lane mode (for example channels 1, 2 and 4).
+
 ## [0.2.0] - 2026-09-18
 
 ### Added

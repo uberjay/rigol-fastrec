@@ -41,3 +41,15 @@ def test_defaults_pass_validation_then_fail_on_not_open():
     from rigol_fastrec.exceptions import ScopeNotFound
     with pytest.raises(ScopeNotFound):
         _read(count=10, average=10)
+
+
+def test_readback_stats_are_copied_and_invalidated_on_failed_request():
+    rb = _rb()
+    assert rb.last_read_stats is None
+    rb._last_read_stats = {'chunk': 250}
+    stats = rb.last_read_stats
+    stats['chunk'] = 999
+    assert rb.last_read_stats == {'chunk': 250}
+    with pytest.raises(ValueError):
+        rb.read(count=1, samples_per_frame=1000, sample_bits=10)
+    assert rb.last_read_stats is None

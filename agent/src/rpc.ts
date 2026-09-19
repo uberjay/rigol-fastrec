@@ -8,6 +8,8 @@ import { channelLayout as getChannelLayout, type ChannelLayout } from "./native/
 import { readFrames as doReadFrames, restoreExport, streamFrames as doStreamFrames, streamStop as doStreamStop, type ReadFramesArgs, type ReadFramesResult, type StreamArgs } from "./native/readback.js";
 import * as transport from "./transport.js";
 
+import { disarmRecordCsv } from "./native/csv.js";
+
 let initialized = false;
 
 export function init(): { ok: boolean } {
@@ -16,6 +18,7 @@ export function init(): { ok: boolean } {
 }
 
 export function dispose(): { ok: boolean } {
+    disarmRecordCsv();
     doStreamStop();    // ask any running stream loop to stop
     restoreExport();   // un-freeze the live playback loop if a readback was cut short
     transport.close();
