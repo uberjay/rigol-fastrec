@@ -43,9 +43,7 @@ change `agent/`; see Toolchain.)
 
 The MHO900 runs Android, so you need a frida-server running on it, reached over
 `adb` (Android Debug Bridge). The package can do the whole thing over ADB (the
-scope exposes it on :55555 with no authentication). Nothing on the scope changes
-persistently: the binary lives in `/data/local/tmp` and is started per boot,
-never wired into the scope's init.
+scope exposes it on :55555 with no authentication). Nothing on the scope initialization is modified: the binary lives in `/data/local/tmp` and must started per boot.
 
 ```bash
 # once, and again after upgrading frida on the host: download the matching
