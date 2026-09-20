@@ -78,26 +78,37 @@ def ready_scpi(monkeypatch):
     return control, instrument
 
 
-@pytest.mark.parametrize("positions", [
-    ["1"],                  # The initial 0 need not be observed.
-    ["0", "0", "1"],
-    ["4", "0", "1"],        # Failing capture's first response must not release triggers.
-    ["4", "4", "2", "1"],
+@pytest.mark.parametrize("positions,progress", [
+    (["1"], ["1"]),        # Both zeros can fall between queries.
+    (["0", "0", "1"], ["1"]),
+    (["4", "0", "1"], ["1"]),
+    (["4", "4", "2", "1"], ["1"]),
+    (["1", "0", "1"], ["0", "1"]),  # Stale 1, timer reset, then fresh 1.
+    (["1", "1"], ["0", "1"]),       # Cursor zero was missed entirely.
+    (["1", "1"], ["253000", "1"]),  # Previous record must not satisfy it.
 ])
-def test_run_record_waits_for_exactly_one(ready_scpi, caplog, positions):
+def test_run_record_confirms_cursor_against_progress(ready_scpi, caplog,
+                                                   positions, progress):
     control, instrument = ready_scpi
-    responses = iter(positions)
+    expected = []
+    counts = iter(progress)
+    for position in positions:
+        expected.append((":RECord:WREPlay:FCURrent?", position))
+        if position == "1":
+            expected.append((":RECord:WREPlay:FMAX?", next(counts)))
+    responses = iter(expected)
 
     def query(command):
-        assert command == ":RECord:WREPlay:FCURrent?"
+        expected_command, value = next(responses)
+        assert command == expected_command
         assert instrument.timeout == 15000  # Widened for the whole readiness poll.
-        return next(responses)
+        return value
 
     instrument.query.side_effect = query
     with caplog.at_level("DEBUG", logger="rigol_fastrec.scpi"):
         control.run_record(253000, ready_timeout=10.0)
 
-    assert instrument.query.call_count == len(positions)
+    assert instrument.query.call_count == len(expected)
     assert [call.args[0] for call in instrument.write.call_args_list] == [
         ":RECord:WRECord:OPERate STOP",
         ":RECord:WRECord:FRAMes 253000",
@@ -106,28 +117,35 @@ def test_run_record_waits_for_exactly_one(ready_scpi, caplog, positions):
     assert instrument.timeout == 7000
     if "4" in positions:
         assert "ignoring unexpected FCURrent=4" in caplog.text
+    if "0" in progress:
+        assert "FCURrent=1 but WREPlay FMAX=0" in caplog.text
 
 
-@pytest.mark.parametrize("position", ["0", "4"])
-def test_wait_ready_times_out_without_one_and_restores_timeout(ready_scpi, position):
+@pytest.mark.parametrize("position,progress", [
+    ("0", "1"), ("4", "1"), ("1", "0"), ("1", "253000"),
+])
+def test_wait_ready_times_out_without_confirmation(ready_scpi, position, progress):
     control, instrument = ready_scpi
-    instrument.query.return_value = position
+    values = {":RECord:WREPlay:FCURrent?": position,
+              ":RECord:WREPlay:FMAX?": progress}
+    instrument.query.side_effect = values.__getitem__
 
-    with pytest.raises(ScopeRunTimeout, match="FCURrent never reached 1"):
+    with pytest.raises(ScopeRunTimeout, match="readiness was not confirmed"):
         control.wait_ready(n_frames=253000, timeout=0.02)
 
     assert instrument.query.call_count > 1
     assert instrument.timeout == 7000
 
 
-def test_wait_ready_retries_visa_timeout(ready_scpi):
+@pytest.mark.parametrize("error_query", ["cursor", "progress"])
+def test_wait_ready_retries_visa_timeout(ready_scpi, error_query):
     control, instrument = ready_scpi
-    instrument.query.side_effect = [
-        pyvisa.errors.VisaIOError(pyvisa.constants.StatusCode.error_timeout),
-        "0", "1",
-    ]
+    error = pyvisa.errors.VisaIOError(pyvisa.constants.StatusCode.error_timeout)
+    instrument.query.side_effect = ([error, "0", "1", "1"]
+                                    if error_query == "cursor"
+                                    else ["1", error, "1", "1"])
 
     control.wait_ready(n_frames=253000, timeout=1.0)
 
-    assert instrument.query.call_count == 3
+    assert instrument.query.call_count == 4
     assert instrument.timeout == 7000

@@ -6,7 +6,7 @@ the WaveRecord lifecycle (run → ready → recorded → replay). The frame read
 is a separate channel (`Readback`); `WaveRecorder` orchestrates the two.
 
 The WaveRecord sequence is order-sensitive: SCAL-before-MDEP, the signed
-``trigger_offset_us`` window placement, the widened-VISA FCURrent→1 readiness poll,
+``trigger_offset_us`` window placement, the widened-VISA readiness poll,
 and the record→replay transition.
 """
 
@@ -236,8 +236,8 @@ class ScpiControl:
                    ready_timeout: float | None = None) -> None:
         """Run WaveRecord for `n_frames` (:WRECord:OPERate RUN). With
         `wait_ready` (default), block until the producer pipeline is armed
-        (:WREPlay:FCURrent reaches 1, before any trigger) — not just the trigger
-        comparator set — so triggers fired afterward are caught."""
+        (:WREPlay:FCURrent and :WREPlay:FMAX both reach 1, before any trigger).
+        Keep the trigger source quiet until this returns."""
         assert self._inst is not None
         w = self.write
         w(":RECord:WRECord:OPERate STOP")
@@ -248,10 +248,16 @@ class ScpiControl:
 
     def wait_ready(self, *, n_frames: int, timeout: float | None = None) -> None:
         """Block until the WaveRecord engine is armed and ready to catch
-        triggers, by polling :WREPlay:FCURrent until it reaches 1. FCURrent
-        becomes 1 when the engine comes up — BEFORE any trigger fires — so it's a
-        readiness signal. Require exactly 1: a larger value may still be a
-        position from the previous replay while the new run is staging.
+        triggers. Require :WREPlay:FCURrent == 1 AND :WREPlay:FMAX == 1.
+        STOP leaves FCURrent at 1, which can survive into the next RUN until
+        the record timer refreshes it. RUN clears the record-progress field
+        behind playback FMAX; corroborating the cursor with that field rejects
+        a stale 1 without requiring us to observe a transient zero. This is
+        WREPlay:FMAX, NOT WRECord:FMAX (the capacity limit).
+
+        Both values settle at 1 before any trigger in NORM sweep. The caller
+        must keep triggers quiet until this returns. See
+        docs/WAVERECORD_READINESS.md.
         NB FCURrent is a 1-based live *position*, not a frame count: it
         sits at 1 through the first trigger and only increments to 2 on the
         second, so don't read it as "frames recorded so far."
@@ -266,7 +272,7 @@ class ScpiControl:
             # Run staging is erratically slow and NOT frame-proportional — on a
             # healthy scope FCURrent→1 can take anywhere from ~1 s to ~16 s for
             # the same run (worse near memory-full). The deadline only bounds a
-            # genuine failure — it returns the instant FCURrent reaches 1 — so be
+            # genuine failure — it returns when readiness is confirmed — so be
             # generous. A real NORM+trigger capture comes up well within this.
             timeout = max(20.0, 8.0 + n_frames / 10000.0)
         raw = self._inst
@@ -275,10 +281,16 @@ class ScpiControl:
         deadline = time.monotonic() + timeout
         try:
             while True:
+                position = progress = None
                 try:
                     position = int(self.query(":RECord:WREPlay:FCURrent?"))
                     if position == 1:
-                        return
+                        progress = int(self.query(":RECord:WREPlay:FMAX?"))
+                        if progress == 1:
+                            return
+                        log.debug(
+                            "wait_ready: FCURrent=1 but WREPlay FMAX=%d; "
+                            "waiting for current-run readiness", progress)
                     if position > 1:
                         log.debug(
                             "wait_ready: ignoring unexpected FCURrent=%d; "
@@ -289,8 +301,9 @@ class ScpiControl:
                 if time.monotonic() > deadline:
                     raise ScopeRunTimeout(
                         f"WaveRecord run timeout after {timeout:.0f}s "
-                        f"({n_frames} frames): :WREPlay:FCURrent never reached 1, "
-                        f"so readiness was not confirmed.")
+                        f"({n_frames} frames): readiness was not confirmed "
+                        f"(WREPlay FCURrent={position}, FMAX={progress}; "
+                        f"expected both to be 1 with triggers held quiet).")
                 time.sleep(0.01)
         finally:
             raw.timeout = prev_timeout

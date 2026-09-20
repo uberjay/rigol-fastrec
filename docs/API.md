@@ -67,9 +67,11 @@ capture API below preserves both requested and actual values.
 
 ## `run(n_frames, *, ready_timeout=None, capture_metadata=False)`
 
-Arms WaveRecord for `n_frames` and blocks until the engine is actually recording
-(`:WREPlay:FCURrent` reaches 1, before any trigger), so triggers fired after
-`run()` returns are caught. Fire your DUT triggers after this returns.
+Arms WaveRecord for `n_frames` and waits for both `:WREPlay:FCURrent?` and
+`:WREPlay:FMAX?` to read 1. The playback FMAX check rejects a cursor left at 1
+by the previous recording, without requiring the poll to catch a transient zero.
+Keep DUT triggers quiet until `run()` returns. See the
+[firmware analysis and validation](WAVERECORD_READINESS.md).
 
 Raises `ValueError` immediately if `n_frames` exceeds the cached `FMAX`, and
 `ScopeRunTimeout` if the engine never comes up within `ready_timeout` (default

@@ -23,6 +23,11 @@ Two independent host↔scope channels, three layers:
 - `WaveRecorder` drives the two. The app fires its DUT triggers between `run()`
   and `wait_recorded()`.
 
+For finite captures, `run()` corroborates the playback cursor with playback
+FMAX to reject stale positions without needing to observe a transient zero.
+See [WaveRecord readiness](WAVERECORD_READINESS.md) for the firmware analysis
+and live validation.
+
 ## How readback works
 
 The agent is TypeScript compiled with `frida-compile` into the committed

@@ -6,6 +6,18 @@ Notable changes to rigol-fastrec. Format follows
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-09-20
+
+### Added
+- Repository guidance in `AGENTS.md` and firmware analysis with live validation
+  results in `docs/WAVERECORD_READINESS.md`.
+
+### Fixed
+- WaveRecord readiness also checks `:WREPlay:FMAX? == 1`. Recording STOP can
+  leave the playback cursor at 1, so checking FCURrent alone could release DUT
+  triggers before the next arm was ready. The check does not require observing
+  the transient zero during startup.
+
 ## [0.5.0] - 2026-09-19
 
 ### Fixed
@@ -145,7 +157,8 @@ cropping done on the scope. Validated on an MHO98 (firmware `00.01.00`).
 - Self-contained wheel: the Frida agent bundle is committed and ships as package
   data, so installing needs no Node toolchain.
 
-[Unreleased]: https://github.com/uberjay/rigol-fastrec/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/uberjay/rigol-fastrec/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/uberjay/rigol-fastrec/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/uberjay/rigol-fastrec/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/uberjay/rigol-fastrec/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/uberjay/rigol-fastrec/compare/v0.2.0...v0.3.0

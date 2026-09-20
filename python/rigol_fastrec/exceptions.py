@@ -28,7 +28,7 @@ class UnsupportedFirmware(RigolFastrecError):
 
 
 class ScopeRunTimeout(RigolFastrecError):
-    """WaveRecord did not come up (FMAX never reached 1) within the deadline."""
+    """WaveRecord did not become ready or finish recording within the deadline."""
 
 
 class MetadataError(RigolFastrecError):

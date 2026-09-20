@@ -134,8 +134,8 @@ class WaveRecorder:
     def run(self, n_frames: int, *, ready_timeout: float | None = None,
             capture_metadata: bool = False) -> None:
         """Run WaveRecord for `n_frames` and block until the producer pipeline
-        is armed (:WREPlay:FCURrent reaches 1, before any trigger). Fire the DUT
-        triggers AFTER this returns.
+        is armed (:WREPlay:FCURrent and :WREPlay:FMAX both reach 1, before
+        any trigger). Keep DUT triggers quiet until this returns.
 
         Raises ValueError if `n_frames` exceeds the max recordable at this depth
         (one record can't hold them) — split across multiple run()/read() cycles
