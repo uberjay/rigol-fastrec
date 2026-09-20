@@ -6,7 +6,7 @@ the WaveRecord lifecycle (run → ready → recorded → replay). The frame read
 is a separate channel (`Readback`); `WaveRecorder` orchestrates the two.
 
 The WaveRecord sequence is order-sensitive: SCAL-before-MDEP, the signed
-``trigger_offset_us`` window placement, the widened-VISA FMAX→1 readiness poll,
+``trigger_offset_us`` window placement, the widened-VISA FCURrent→1 readiness poll,
 and the record→replay transition.
 """
 
@@ -250,8 +250,9 @@ class ScpiControl:
         """Block until the WaveRecord engine is armed and ready to catch
         triggers, by polling :WREPlay:FCURrent until it reaches 1. FCURrent
         becomes 1 when the engine comes up — BEFORE any trigger fires — so it's a
-        true readiness signal (unlike FMAX, the capacity cap, which was the wrong
-        one). NB FCURrent is a 1-based live *position*, not a frame count: it
+        readiness signal. Require exactly 1: a larger value may still be a
+        position from the previous replay while the new run is staging.
+        NB FCURrent is a 1-based live *position*, not a frame count: it
         sits at 1 through the first trigger and only increments to 2 on the
         second, so don't read it as "frames recorded so far."
 
@@ -263,7 +264,7 @@ class ScpiControl:
         assert self._inst is not None
         if timeout is None:
             # Run staging is erratically slow and NOT frame-proportional — on a
-            # healthy scope FCURrent→≥1 can take anywhere from ~1 s to ~16 s for
+            # healthy scope FCURrent→1 can take anywhere from ~1 s to ~16 s for
             # the same run (worse near memory-full). The deadline only bounds a
             # genuine failure — it returns the instant FCURrent reaches 1 — so be
             # generous. A real NORM+trigger capture comes up well within this.
@@ -275,15 +276,21 @@ class ScpiControl:
         try:
             while True:
                 try:
-                    if int(self.query(":RECord:WREPlay:FCURrent?")) >= 1:
+                    position = int(self.query(":RECord:WREPlay:FCURrent?"))
+                    if position == 1:
                         return
+                    if position > 1:
+                        log.debug(
+                            "wait_ready: ignoring unexpected FCURrent=%d; "
+                            "waiting for 1 (possibly a previous replay position)",
+                            position)
                 except pyvisa.errors.VisaIOError:
                     pass    # scope still staging the run — keep polling
                 if time.monotonic() > deadline:
                     raise ScopeRunTimeout(
                         f"WaveRecord run timeout after {timeout:.0f}s "
                         f"({n_frames} frames): :WREPlay:FCURrent never reached 1, "
-                        f"so the record engine never armed.")
+                        f"so readiness was not confirmed.")
                 time.sleep(0.01)
         finally:
             raw.timeout = prev_timeout

@@ -1,10 +1,15 @@
-"""Pure SCPI-layer helpers: MDEP snapping and code→volts scaling."""
+"""Offline SCPI tests: readiness, MDEP snapping and code→volts scaling."""
+
+from types import SimpleNamespace
+from unittest.mock import Mock
 
 import numpy as np
+import pyvisa
 import pytest
 
 from rigol_fastrec.scpi import _RIGOL_VALID_MDEP, ScpiControl, snap_mdep
-from rigol_fastrec import WaveformPreamble, ScalingError
+from rigol_fastrec import WaveformPreamble, ScalingError, ScopeRunTimeout
+from rigol_fastrec import scpi as scpi_module
 
 
 def test_snap_mdep_rounds_up_to_valid_depth():
@@ -55,3 +60,74 @@ def test_to_volts_unknown_channel_rejected():
 def test_nonzero_y_origin_is_in_codes():
     np.testing.assert_allclose(_scpi(.001, 20., 32768.).to_volts(
         np.array([32788, 33788], dtype=np.uint16), 1), [0., 1.], atol=1e-6)
+
+
+@pytest.fixture
+def ready_scpi(monkeypatch):
+    # No open(): all writes/queries go to a fake instrument, with virtual time.
+    clock = SimpleNamespace(now=0.0)
+
+    def sleep(seconds):
+        clock.now += seconds
+
+    monkeypatch.setattr(scpi_module, "time", SimpleNamespace(
+        monotonic=lambda: clock.now, sleep=sleep))
+    control = ScpiControl("unused")
+    instrument = Mock(timeout=7000)
+    control._inst = instrument
+    return control, instrument
+
+
+@pytest.mark.parametrize("positions", [
+    ["1"],                  # The initial 0 need not be observed.
+    ["0", "0", "1"],
+    ["4", "0", "1"],        # Failing capture's first response must not release triggers.
+    ["4", "4", "2", "1"],
+])
+def test_run_record_waits_for_exactly_one(ready_scpi, caplog, positions):
+    control, instrument = ready_scpi
+    responses = iter(positions)
+
+    def query(command):
+        assert command == ":RECord:WREPlay:FCURrent?"
+        assert instrument.timeout == 15000  # Widened for the whole readiness poll.
+        return next(responses)
+
+    instrument.query.side_effect = query
+    with caplog.at_level("DEBUG", logger="rigol_fastrec.scpi"):
+        control.run_record(253000, ready_timeout=10.0)
+
+    assert instrument.query.call_count == len(positions)
+    assert [call.args[0] for call in instrument.write.call_args_list] == [
+        ":RECord:WRECord:OPERate STOP",
+        ":RECord:WRECord:FRAMes 253000",
+        ":RECord:WRECord:OPERate RUN",
+    ]
+    assert instrument.timeout == 7000
+    if "4" in positions:
+        assert "ignoring unexpected FCURrent=4" in caplog.text
+
+
+@pytest.mark.parametrize("position", ["0", "4"])
+def test_wait_ready_times_out_without_one_and_restores_timeout(ready_scpi, position):
+    control, instrument = ready_scpi
+    instrument.query.return_value = position
+
+    with pytest.raises(ScopeRunTimeout, match="FCURrent never reached 1"):
+        control.wait_ready(n_frames=253000, timeout=0.02)
+
+    assert instrument.query.call_count > 1
+    assert instrument.timeout == 7000
+
+
+def test_wait_ready_retries_visa_timeout(ready_scpi):
+    control, instrument = ready_scpi
+    instrument.query.side_effect = [
+        pyvisa.errors.VisaIOError(pyvisa.constants.StatusCode.error_timeout),
+        "0", "1",
+    ]
+
+    control.wait_ready(n_frames=253000, timeout=1.0)
+
+    assert instrument.query.call_count == 3
+    assert instrument.timeout == 7000

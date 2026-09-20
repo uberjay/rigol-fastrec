@@ -33,19 +33,32 @@ let avgOutBuf: NativePointer | null = null, avgOutBytes = 0;
 let armArgs: ArmArgs | null = null;
 let armArgsKey = -1;       // engineSamples the cached args were primed at
 
-// dwMaxFrameCount (CDrvParam+0x60): how many frames of the current MDEP fit in
-// record memory, i.e. the most a single SetRun can arm. This is the bound on the
-// per-SetRun chunk. It's MDEP-derived, so read it fresh each readback (it changes
-// with depth).
+// dwMaxFrameCount (CDrvParam+0x60) is the replay ping-pong limit, NOT
+// WaveRecord capacity. Near re-arm it can be zero, unreadable, or stale (even
+// the full record size). An oversized SetRun can wedge the blocking XDMA read.
+// Restore the PoC's plausibility bound and cache, keyed by frame geometry so
+// changing MDEP/channels cannot reuse a cap from a smaller frame. A smaller
+// plausible cap is always honored; a later larger read cannot grow the chunk.
+const HWMAX_PLAUSIBLE = 8192;
+const CHUNK_FALLBACK = 1;   // conservative even at depths outside the SCA setup
+let chunkGeometry = "";
+let cachedHwMax = 0;
+
 function clampChunk(scope: NativePointer, off: Readonly<Record<string, number>>,
-                    total: number): { chunk: number; hwMax: number } {
-    const hwMax = scope.add(off.drvParam).add(off.dwMaxFrameCount).readU32() | 0;
-    if (hwMax < 1) throw new Error(
-        `dwMaxFrameCount read ${hwMax} at CDrvParam+0x${off.dwMaxFrameCount.toString(16)}; `
-        + "cannot size the readback chunk");
-    let chunk = total > hwMax ? hwMax : total;
-    if (chunk < 1) chunk = 1;
-    return { chunk, hwMax };
+                    total: number, geometry: string
+                    ): { chunk: number; hwMax: number; hwRaw: number | null } {
+    if (geometry !== chunkGeometry) {
+        chunkGeometry = geometry;
+        cachedHwMax = 0;
+    }
+    let hwRaw: number | null = null;
+    try { hwRaw = scope.add(off.drvParam).add(off.dwMaxFrameCount).readU32(); }
+    catch { /* use the validated cache or a one-frame fallback */ }
+    if (hwRaw !== null && hwRaw >= 1 && hwRaw <= HWMAX_PLAUSIBLE) {
+        cachedHwMax = cachedHwMax > 0 ? Math.min(cachedHwMax, hwRaw) : hwRaw;
+    }
+    const hwMax = cachedHwMax || CHUNK_FALLBACK;
+    return { chunk: Math.max(1, Math.min(total, hwMax)), hwMax, hwRaw };
 }
 
 // Prime the SPU/SetRun args by hooking the firmware's own single-frame export
@@ -227,11 +240,12 @@ function readFramesInner(a: ReadFramesArgs, r: ResolvedFns): ReadFramesResult {
     const k = (a.average | 0) < 1 ? 1 : (a.average | 0);
     const scope = r.drvGetScope() as NativePointer;
 
-    const { chunk: normalChunk, hwMax } = clampChunk(scope, r.profile.offsets, total);
+    const { chunk: normalChunk, hwMax, hwRaw } = clampChunk(
+        scope, r.profile.offsets, total, `${spf}:${s}:${lay.enabledMask}`);
     const timestamps = a.timestampRegisters === true;
     const chunk = timestamps ? 1 : normalChunk;
     // Emit before the first blocking read so a wedged DMA still logs the chunk.
-    send({ type: "fastrec_chunk", msg: `chunk=${chunk} cap=${hwMax} ` +
+    send({ type: "fastrec_chunk", msg: `chunk=${chunk} cap=${hwMax} rawCap=${hwRaw} ` +
           `total=${total} k=${k} eng=${eng} nch=${nch}` });
 
     const outMax = spf;   // per-channel samples = eng / stride
@@ -460,7 +474,8 @@ async function streamLoop(a: StreamArgs): Promise<void> {
     offsets.forEach((o, i) => offsetsBuf.add(i * 4).writeU32(o));
 
     const scope = r.drvGetScope() as NativePointer;
-    const hwMax = clampChunk(scope, r.profile.offsets, 1).hwMax;
+    const hwMax = clampChunk(
+        scope, r.profile.offsets, 1, `${spf}:${s}:${lay.enabledMask}`).hwMax;
     const N = a.batch > 0 ? Math.min(a.batch | 0, hwMax) : hwMax;
 
     const cBytes = N * eng * 2;

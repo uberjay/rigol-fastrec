@@ -6,6 +6,19 @@ Notable changes to rigol-fastrec. Format follows
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-09-19
+
+### Fixed
+- WaveRecord readiness now requires `:WREPlay:FCURrent? == 1`. Stale positive
+  playback positions such as 3 or 4 are logged and ignored while the new run
+  stages, preventing the caller from firing its trigger burst too early.
+- Native readback bounds and caches the replay DMA chunk limit per frame
+  geometry. Zero, unreadable, or implausibly large `dwMaxFrameCount` values use
+  the validated cache or a one-frame fallback; logs include the raw limit.
+  The bundled Frida agent includes this guard.
+- A socket reader that remains alive after its join timeout now closes the
+  stream and raises `ReadbackShortRead` instead of returning incomplete arrays.
+
 ## [0.4.0] - 2026-09-19
 
 ### Added
@@ -132,7 +145,8 @@ cropping done on the scope. Validated on an MHO98 (firmware `00.01.00`).
 - Self-contained wheel: the Frida agent bundle is committed and ships as package
   data, so installing needs no Node toolchain.
 
-[Unreleased]: https://github.com/uberjay/rigol-fastrec/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/uberjay/rigol-fastrec/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/uberjay/rigol-fastrec/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/uberjay/rigol-fastrec/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/uberjay/rigol-fastrec/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/uberjay/rigol-fastrec/compare/v0.1.0...v0.2.0

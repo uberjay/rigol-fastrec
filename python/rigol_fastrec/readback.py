@@ -315,6 +315,13 @@ class Readback:
         if failed:
             self._close_data_socket()
         t.join(timeout=60.0)
+        if t.is_alive():
+            # An RPC success does not mean the socket reader filled every row.
+            # Never return np.empty() buffers while that thread still owns them.
+            self._close_data_socket()
+            t.join(timeout=1.0)  # allow a blocked recv to unwind after shutdown
+            raise ReadbackShortRead(
+                "stream reader did not finish within 60s; incomplete capture discarded")
 
         if failed or reader_err:
             # On any failure the stream may be mid-record / desynced; the next
